@@ -323,7 +323,7 @@ function widget:Initialize()
 		CommandNotifyMex = CommandNotifyMex, --an event which is called by "cmd_mex_placement.lua" to notify other widgets of mex build commands.
 		CommandNotifyTF = CommandNotifyTF, -- an event called by "gui_lasso_terraform.lua" to notify other widgets of terraform commands.
 		CommandNotifyRaiseAndBuild = CommandNotifyRaiseAndBuild, -- an event called by "gui_lasso_terraform.lua" to notify other widgets of raise-and-build commands.
-		IsControllingUnit = function(id) return allBuilders[id] and allBuilders[id].include end,
+		IsControllingUnit = function(id) return allBuilders[id] end,
 		IsSelectionOverrideSet = true,
 		SelectionOverrideRank = 0,
 	}
