@@ -1130,7 +1130,7 @@ local function TryJobCandidate(unitID, ux, uz, hash, job, doCheckReachable)
 		end
 	end
 
-	local CostFunction = options.intellicost.value and IntelliCost or FlatCost
+	local CostFunction = options.intelliCost.value and IntelliCost or FlatCost
 	local cost, distance = CostFunction(unitID, hash, ux, uz, jx, jz)
 
 	return cost, distance
@@ -1251,7 +1251,7 @@ function FlatCost(unitID, hash, ux, uz, jx, jz)
 	-- The goal of the flat cost model is to provide consistent behavior that is easily directed
 	-- by the player's actions.
 
-	-- Repair, reclaim and resurrect are the same as for intellicost.
+	-- Repair, reclaim and resurrect are the same as for intelliCost.
 
 	-- All build jobs are cost=distance for starting new jobs.
 
