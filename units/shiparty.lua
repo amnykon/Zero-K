@@ -1,7 +1,7 @@
 return { shiparty = {
   unitname               = [[shiparty]],
   name                   = [[Envoy]],
-  description            = [[Cruiser (Artillery)]],
+  description            = [[Artillery Cruiser]],
   acceleration           = 0.25,
   activateWhenBuilt      = true,
   brakeRate              = 1.7,
@@ -16,9 +16,14 @@ return { shiparty = {
   corpse                 = [[DEAD]],
 
   customParams           = {
+    bait_level_default = 1,
     --extradrawrange = 200,
     modelradius    = [[55]],
     turnatfullspeed = [[1]],
+
+    outline_x = 160,
+    outline_y = 160,
+    outline_yoff = 25,
   },
 
   explodeAs              = [[BIG_UNITEX]],
@@ -26,12 +31,9 @@ return { shiparty = {
   footprintX             = 4,
   footprintZ             = 4,
   iconType               = [[shiparty]],
-  idleAutoHeal           = 5,
-  idleTime               = 1800,
   losEmitHeight          = 25,
   maxDamage              = 2000,
   maxVelocity            = 1.7,
-  minCloakDistance       = 75,
   minWaterDepth          = 10,
   movementClass          = [[BOAT4]],
   moveState              = 0,
@@ -72,7 +74,6 @@ return { shiparty = {
       damage                  = {
         default = 601.1,
         planes  = 601.1,
-        subs    = 30,
       },
 
       explosionGenerator      = [[custom:PLASMA_HIT_96]],

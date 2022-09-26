@@ -1,7 +1,7 @@
 return { subraider = {
   unitname               = [[subraider]],
   name                   = [[Seawolf]],
-  description            = [[Attack Submarine (Stealth Raider)]],
+  description            = [[Raider Submarine (Anti-Sub, Undersea Fire)]],
   acceleration           = 0.36,
   activateWhenBuilt      = true,
   brakeRate              = 2.4,
@@ -11,7 +11,7 @@ return { subraider = {
   canGuard               = true,
   canMove                = true,
   canPatrol              = true,
-  category               = [[SUB SINK]],
+  category               = [[SUB SINK TOOFAST]],
   collisionVolumeOffsets = [[0 0 0]],
   collisionVolumeScales  = [[22 22 89]],
   collisionVolumeType    = [[CylZ]],
@@ -22,17 +22,19 @@ return { subraider = {
     aimposoffset   = [[0 1 0]],
     midposoffset   = [[0 -5 0]],
     turnatfullspeed = [[1]],
+    okp_damage = 210,
+
+    outline_x = 128,
+    outline_y = 128,
+    outline_yoff = 16,
   },
 
   explodeAs              = [[SMALL_UNITEX]],
   footprintX             = 3,
   footprintZ             = 3,
   iconType               = [[subraider]],
-  idleAutoHeal           = 5,
-  idleTime               = 1800,
   maxDamage              = 650,
   maxVelocity            = 3.7,
-  minCloakDistance       = 75,
   minWaterDepth          = 15,
   movementClass          = [[UBOAT3]],
   noAutoFire             = false,
@@ -84,11 +86,11 @@ return { subraider = {
         burst = Shared.BURST_RELIABLE,
 
         timeslow_damagefactor = 2,
+        stays_underwater = 1,
       },
 
       damage                  = {
         default = 260.1,
-        subs    = 260.1,
       },
 
       explosionGenerator      = [[custom:disruptor_missile_hit]],
@@ -138,7 +140,6 @@ return { subraider = {
       damage                  = {
         default = 0.1,
         planes  = 0.1,
-        subs    = 0.1,
       },
 
       explosionGenerator      = [[custom:TORPEDO_HIT]],

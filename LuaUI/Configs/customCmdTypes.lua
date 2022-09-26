@@ -42,6 +42,9 @@ local custom_cmd_actions = {
 	idlemode =        {cmdType = 2, cmdID = CMD.IDLEMODE, name = "Air Idle State", states = {'Land', 'Fly'}},
 	autorepairlevel = {cmdType = 2, name = "Air Retreat Threshold", states = {'Off', '30%', '50%', '80%'}},
 	preventoverkill = {cmdType = 2, cmdID = CMD_PREVENT_OVERKILL, name = "Prevent Overkill", states = {'Off', 'On'}},
+	preventbait     = {cmdType = 2, cmdID = CMD_PREVENT_BAIT, name = "Avoid Bad Targets", states = {'Disabled', '40', '100', '300', '600'}},
+	fireatshields   = {cmdType = 2, cmdID = CMD_FIRE_AT_SHIELD, name = "Fire at Shields", states = {'Off', 'On'}},
+	firetowards     = {cmdType = 2, cmdID = CMD_FIRE_TOWARDS_ENEMY, name = "Fire Towards Enemies", states = {'Off', 'On'}},
 	trajectory      = {cmdType = 2, cmdID = CMD.TRAJECTORY, name = "Trajectory", states = {'Low', 'High'}},
 
 	--CUSTOM COMMANDS
@@ -49,6 +52,7 @@ local custom_cmd_actions = {
 	excludeairpad = {cmdType = 1, name = "Exclude an Airpad"},
 	--build = {cmdType = 1, name = "--build"},
 	areamex = {cmdType = 1, name = "Area Mex"},
+	areaterramex = {cmdType = 1, name = "Area Terra Mex"},
 	mine = {cmdType = 1, name = "Mine"},
 	build = {cmdType = 1, name = "Build"},
 	jump = {cmdType = 1, name = "Jump"},
@@ -86,6 +90,9 @@ local custom_cmd_actions = {
 	restoreground = {cmdType = 1, name = "Terraform Restore"},
 	--terraform_internal = {cmdType = 1, name = "--terraform_internal"},
 
+	--build a "generic" plate from build factory menu
+	buildplate = {cmdType = 1, name = "Build Plate"},
+	
 	resetfire = {cmdType = 3, name = "Reset Fire"},
 	resetmove = {cmdType = 3, name = "Reset Move"},
 
@@ -103,6 +110,7 @@ local custom_cmd_actions = {
 	antinukezone =      {cmdType = 2, name = "Ceasefire Antinuke Zone", states = {'Off', 'On'}},
 	unitai =            {cmdType = 2, cmdID = CMD_UNIT_AI, name = "Unit AI", states = {'Off', 'On'}},
 	selection_rank =    {cmdType = 2, name = "Selection Rank", states = {'0', '1', '2', '3'}},
+	formation_rank =    {cmdType = 2, name = "Formation Rank", states = {'0', '1', '2', '3'}},
 	autocalltransport = {cmdType = 2, name = "Auto Call Transport", states = {'Off', 'On'}},
 	unit_kill_subordinates = {cmdType = 2, cmdID = CMD_UNIT_KILL_SUBORDINATES, name = "Dominatrix Kill", states = {'Off', 'On'}},
 	goostate =     {cmdType = 2, cmdID = CMD_GOO_GATHER, name = "Goo State", states = {'Off', 'When uncloaked', 'On'}},
@@ -137,6 +145,7 @@ local usedActions = {
 	["areaguard"] = true,
 	["orbitdraw"] = true,
 	["preventoverkill"] = true,
+	["preventbait"] = true,
 	["retreat"] = true,
 	["unitai"] = true,
 	["settarget"] = true,
@@ -151,12 +160,14 @@ local usedActions = {
 	["repair"] = true,
 	["reclaim"] = true,
 	["areamex"] = true,
+	["areaterramex"] = true,
 	["priority"] = true,
 	["rampground"] = true,
 	["levelground"] = true,
 	["raiseground"] = true,
 	["smoothground"] = true,
 	["restoreground"] = true,
+	["buildplate"] = true,
 	["jump"] = true,
 	["idlemode"] = true,
 	["areaattack"] = true,
@@ -164,7 +175,7 @@ local usedActions = {
 	["find_pad"] = true,
 	["recalldrones"] = true,
 	["toggledrones"] = true,
-	["divestate"] = true,
+	--["divestate"] = true,
 	["wantcloak"] = true,
 	["oneclickwep"] = true,
 	["floatstate"] = true,
@@ -192,8 +203,11 @@ local usedActions = {
 	["setfirezone"] = true,
 	["cancelfirezone"] = true,
 	["selection_rank"] = true,
+	["formation_rank"] = true,
 	["pushpull"] = true,
 	["unit_kill_subordinates"] = true,
+	["fireatshields"] = true,
+	["firetowards"] = true,
 	["goostate"] = true,
 
 	-- These actions are used, just not by selecting everything with default UI

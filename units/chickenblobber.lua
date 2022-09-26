@@ -30,7 +30,6 @@ return { chickenblobber = {
   maxSlope            = 36,
   maxVelocity         = 1.8,
   maxWaterDepth       = 5000,
-  minCloakDistance    = 75,
   movementClass       = [[BHOVER3]],
   noAutoFire          = false,
   noChaseCategory     = [[TERRAFORM FIXEDWING SATELLITE GUNSHIP SUB MOBILE STUPIDTARGET MINE]],
@@ -91,7 +90,6 @@ return { chickenblobber = {
       damage                  = {
         default = 180,
         planes  = 180,
-        subs    = 9,
       },
 
       explosionGenerator      = [[custom:blobber_goo]],

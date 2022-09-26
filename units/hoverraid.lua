@@ -1,7 +1,7 @@
 return { hoverraid = {
   unitname            = [[hoverraid]],
   name                = [[Dagger]],
-  description         = [[Fast Attack Hovercraft]],
+  description         = [[Fast Attack Hovercraft (Anti-Sub)]],
   acceleration        = 0.384,
   activateWhenBuilt   = true,
   brakeRate           = 1.0,
@@ -11,7 +11,7 @@ return { hoverraid = {
   canGuard            = true,
   canMove             = true,
   canPatrol           = true,
-  category            = [[HOVER]],
+  category            = [[HOVER TOOFAST]],
   collisionVolumeOffsets = [[0 -2 0]],
   collisionVolumeScales  = [[19 19 36]],
   collisionVolumeType    = [[cylZ]],
@@ -20,18 +20,17 @@ return { hoverraid = {
   customParams        = {
     modelradius        = [[25]],
     aim_lookahead      = 120,
+    bait_level_default = 0,
+    turnatfullspeed_hover = [[1]],
   },
 
   explodeAs           = [[SMALL_UNITEX]],
   footprintX          = 2,
   footprintZ          = 2,
-  iconType            = [[hoverraider]],
-  idleAutoHeal        = 5,
-  idleTime            = 1800,
+  iconType            = [[hoverscout]],
   maxDamage           = 300,
   maxSlope            = 36,
-  maxVelocity         = 4.75,
-  minCloakDistance    = 75,
+  maxVelocity         = 4.8,
   movementClass       = [[HOVER2]],
   noAutoFire          = false,
   noChaseCategory     = [[TERRAFORM FIXEDWING SUB]],
@@ -68,7 +67,7 @@ return { hoverraid = {
   weaponDefs          = {
 
     GAUSS = {
-      name                    = [[Gauss Cannon]],
+      name                    = [[Light Gauss Cannon]],
       alphaDecay              = 0.12,
       areaOfEffect            = 16,
       avoidfeature            = false,
@@ -87,7 +86,7 @@ return { hoverraid = {
       },
       
       damage                  = {
-        default = 100.01,
+        default = 110.01,
       },
       
       explosionGenerator      = [[custom:gauss_hit_l]],

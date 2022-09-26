@@ -31,11 +31,10 @@ return { gunshipraid = {
   footprintZ             = 2,
   hoverAttack            = true,
   iconType               = [[gunshipraider]],
-  idleAutoHeal           = 5,
+  idleAutoHeal           = 6,
   idleTime               = 150,
   maxDamage              = 800,
   maxVelocity            = 6.9,
-  minCloakDistance       = 75,
   noChaseCategory        = [[TERRAFORM SUB]],
   objectName             = [[banshee.s3o]],
   script                 = [[gunshipraid.lua]],
@@ -88,8 +87,7 @@ return { gunshipraid = {
       },
 
       damage                  = {
-        default = 7.6,
-        subs    = 0.38,
+        default = 7.9,
       },
 
       explosionGenerator      = [[custom:flash1red]],

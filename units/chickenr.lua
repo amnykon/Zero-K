@@ -16,6 +16,9 @@ return { chickenr = {
   category            = [[LAND]],
 
   customParams        = {
+    outline_x = 85,
+    outline_y = 85,
+    outline_yoff = 20,
   },
 
   explodeAs           = [[NOWEAPON]],
@@ -30,7 +33,6 @@ return { chickenr = {
   maxSlope            = 36,
   maxVelocity         = 1.8,
   maxWaterDepth       = 5000,
-  minCloakDistance    = 75,
   movementClass       = [[BHOVER3]],
   noAutoFire          = false,
   noChaseCategory     = [[TERRAFORM FIXEDWING SATELLITE GUNSHIP SUB MOBILE STUPIDTARGET MINE]],

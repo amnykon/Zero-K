@@ -19,20 +19,22 @@ return { vehriot = {
   customParams        = {
     selection_scale   = 0.85,
     aim_lookahead     = 100,
+    set_target_range_buffer = 50,
+
+    outline_x = 80,
+    outline_y = 80,
+    outline_yoff = 12.5,
   },
 
   explodeAs           = [[BIG_UNITEX]],
   footprintX          = 3,
   footprintZ          = 3,
   iconType            = [[vehicleriot]],
-  idleAutoHeal        = 5,
-  idleTime            = 1800,
   leaveTracks         = true,
   maxDamage           = 1020,
   maxSlope            = 18,
   maxVelocity         = 2.1,
   maxWaterDepth       = 22,
-  minCloakDistance    = 75,
   movementClass       = [[TANK3]],
   noAutoFire          = false,
   noChaseCategory     = [[TERRAFORM FIXEDWING SATELLITE SUB]],
@@ -93,7 +95,6 @@ return { vehriot = {
       damage                  = {
         default = 260.2,
         planes  = 260.2,
-        subs    = 13.5,
       },
 
       edgeEffectiveness       = 0.75,

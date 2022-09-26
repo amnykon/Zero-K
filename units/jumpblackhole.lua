@@ -17,22 +17,25 @@ return { jumpblackhole = {
   corpse                = [[DEAD]],
 
   customParams          = {
+    bait_level_default = 0,
+    can_target_allies  = 1,
     midposoffset   = [[0 10 0]],
+
+    outline_x = 80,
+    outline_y = 90,
+    outline_yoff = 30,
   },
 
   explodeAs             = [[BIG_UNITEX]],
   footprintX            = 2,
   footprintZ            = 2,
   iconType              = [[kbotwideriot]],
-  idleAutoHeal          = 5,
-  idleTime              = 1800,
   leaveTracks           = true,
   losEmitHeight         = 40,
   maxDamage             = 900,
   maxSlope              = 36,
   maxVelocity           = 2,
   maxWaterDepth         = 22,
-  minCloakDistance      = 75,
   movementClass         = [[KBOT2]],
   noAutoFire            = false,
   noChaseCategory       = [[FIXEDWING SATELLITE GUNSHIP SUB TURRET UNARMED]],

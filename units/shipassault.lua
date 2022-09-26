@@ -1,7 +1,7 @@
 return { shipassault = {
   unitname               = [[shipassault]],
   name                   = [[Siren]],
-  description            = [[Destroyer (Riot/Assault)]],
+  description            = [[Riot/Assault Destroyer (Anti-Sub)]],
   acceleration           = 0.46,
   activateWhenBuilt      = true,
   brakeRate              = 0.6,
@@ -18,9 +18,14 @@ return { shipassault = {
   corpse                 = [[DEAD]],
   --Core_color.dds Core_other.dds
   customParams           = {
+    bait_level_default = 0,
     modelradius    = [[55]],
     turnatfullspeed = [[1]],
     extradrawrange = 800,
+
+    outline_x = 160,
+    outline_y = 160,
+    outline_yoff = 25,
   },
 
   explodeAs              = [[BIG_UNITEX]],
@@ -28,12 +33,9 @@ return { shipassault = {
   footprintX             = 4,
   footprintZ             = 4,
   iconType               = [[shipassault]],
-  idleAutoHeal           = 5,
-  idleTime               = 1800,
   losEmitHeight          = 25,
   maxDamage              = 5200,
   maxVelocity            = 2.0,
-  minCloakDistance       = 75,
   minWaterDepth          = 5,
   movementClass          = [[BOAT4]],
   noAutoFire             = false,
@@ -88,6 +90,7 @@ return { shipassault = {
         craterMult              = 0,
 
         customParams            = {
+            force_ignore_ground = [[1]],
             slot = [[5]],
             muzzleEffectFire = [[custom:HEAVY_CANNON_MUZZLE]],
             miscEffectFire   = [[custom:RIOT_SHELL_L]],
@@ -137,7 +140,9 @@ return { shipassault = {
       collideFriendly         = false,
       craterBoost             = 1,
       craterMult              = 2,
-
+      customParams            = {
+        combatRange = 265,
+      },
       damage                  = {
         default = 400.01,
       },

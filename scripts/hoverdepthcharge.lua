@@ -12,6 +12,8 @@ for i = 1, 8 do
 	wakes[i] = piece ('wake' .. i)
 end
 
+local OKP_DAMAGE = tonumber(UnitDefs[unitDefID].customParams.okp_damage)
+
 local SIG_HIT = 2
 
 local function WobbleUnit()
@@ -113,7 +115,7 @@ function script.Create()
 	StartThread(GG.Script.SmokeUnit, unitID, {base})
 	StartThread(WobbleUnit)
 	StartThread(MoveScript)
-	--StartThread(WeaponRangeUpdate) -- Not required as ranges are equal.
+	StartThread(WeaponRangeUpdate) -- Not required as ranges are equal.
 end
 
 function script.QueryWeapon(num)
@@ -161,7 +163,9 @@ local function FakeWeaponShoot(targetID)
 	if reloaded then
 		local x, y, z = Spring.GetUnitPosition(unitID)
 		local h = Spring.GetGroundHeight(x, z)
-		if h > -5 and not GG.OverkillPrevention_CheckBlock(unitID, targetID, 400, 30) then
+		-- Underestimate damage and flight time. The aim here really is just to avoid every Claymore unloading on a single
+		-- target at the same time. They are a bit too random for anything more precise.
+		if h > -5 and not GG.OverkillPrevention_CheckBlock(unitID, targetID, OKP_DAMAGE, 22) then
 			local gameFrame = spGetGameFrame()
 			local reloadMult = spGetUnitRulesParam(unitID, "totalReloadSpeedChange") or 1.0
 			local reloadFrame = gameFrame + RELOAD / reloadMult
@@ -176,7 +180,7 @@ function script.BlockShot(num, targetID)
 	if num == 1 then
 		-- Underestimate damage and flight time. The aim here really is just to avoid every Claymore unloading on a single
 		-- target at the same time. They are a bit too random for anything more precise.
-		return GG.Script.OverkillPreventionCheck(unitID, targetID, 320.1, 300, 45, 0.1, false, 30)
+		return GG.Script.OverkillPreventionCheck(unitID, targetID, OKP_DAMAGE, 300, 55, 0.1, false, 30)
 	end
 	if num == 2 then
 		if targetID then

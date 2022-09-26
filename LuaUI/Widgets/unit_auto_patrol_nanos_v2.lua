@@ -73,6 +73,7 @@ local spGetTeamResources = Spring.GetTeamResources
 local spValidUnitID     = Spring.ValidUnitID
 local spGetUnitCurrentCommand = Spring.GetUnitCurrentCommand
 local spGetUnitResources = Spring.GetUnitResources
+local spGetUnitHealth = Spring.GetUnitHealth
 
 local TableEcho = Spring.Utilities.TableEcho
 
@@ -92,8 +93,8 @@ local debug = false
 local FPS = Game.gameSpeed
 
 local PATROL = 1
-local RECLAIM_METAL = 2
-local RECLAIM_ENERGY = 3
+local RECLAIM_ALL = 2
+local RECLAIM_METAL = 3
 local REPAIR_UNITS = 4
 local BUILD_ASSIST = 5
 
@@ -123,6 +124,16 @@ local currentFrame = 0
 --------------------------------------------------------------------------------
 -- Functions
 
+local function mapEcho(unitID, text)
+	local x, y, z = spGetUnitPosition(unitID)
+	Spring.MarkerAddPoint(x, y, z, text)
+end
+
+local function mapClear(unitID)
+	local x, y, z = spGetUnitPosition(unitID)
+	Spring.MarkerErasePosition(x, y, z)
+end
+
 -- Slightly randomize intervals, to prevent all caretakers from getting synced
 -- up and all of them deciding to reclaim now, while really what needs to happen
 -- is just some of them reclaiming.
@@ -147,35 +158,56 @@ local function DecideCommands(unitID)
 
 	local metalMake, metalUse, energyMake, energyUse = spGetUnitResources(unitID)
 
-	local metal, metalStorage, metalPull, metalIncome =
+	-- One time, metalUse came back 0 and the script crashed.
+	if metalMake == nil or metalUse == nil or energyMake == nil or energyUse == nil then
+		return {trackedUnit.commandTables[REPAIR_UNITS]}
+	end
+
+	local metal, metalStorage, metalPull, metalIncome, metalExpense,
+			metalShare, metalSent, metalReceived, metalExcess =
 			spGetTeamResources(spGetMyTeamID(), "metal")
 	metalStorage = metalStorage - HIDDEN_STORAGE
 	if debug then
-		Log("metal=", metal, "; storage=", metalStorage, "; pull=", metalPull,
-				" -", metalUse, "; income=", metalIncome, " -", metalMake)
+		Log("metal=", metal,
+				"; storage=", metalStorage,
+				"; pull=", metalPull,
+				"; income=", metalIncome, " - ", metalMake,
+				"; expense=", metalExpense, " - ", metalUse,
+				"; share=", metalShare,
+				"; sent=", metalSent,
+				"; received=", metalReceived,
+				"; excess=", metalExcess)
 	end
-	local energy, energyStorage, energyPull, energyIncome =
+	local energy, energyStorage, energyPull, energyIncome, energyExpense,
+			energyShare, energySent, energyReceived, energyExcess =
 			spGetTeamResources(spGetMyTeamID(), "energy")
 	energyStorage = energyStorage - HIDDEN_STORAGE
 	if debug then
-		Log("energy=", energy, "; storage=", energyStorage, "; pull=", energyPull,
-				" -", energyUse, "; income=", energyIncome, " -", energyMake)
+		Log("energy=", energy,
+				"; storage=", energyStorage,
+				"; pull=", energyPull,
+				"; income=", energyIncome, " - ", energyMake,
+				"; expense=", energyExpense, " - ", energyUse,
+				"; share=", energyShare,
+				"; sent=", energySent,
+				"; received=", energyReceived,
+				"; excess=", energyExcess)
 	end
 
 	-- Subtract what the unit is currently doing from the overall metal/energy
 	-- use/production.
-	metalPull = metalPull - metalUse
+	metalExpense = metalExpense - metalUse
 	metalIncome = metalIncome - metalMake
-	energyPull = energyPull - energyUse
+	energyExpense = energyExpense - energyUse
 	energyIncome = energyIncome - energyMake
 
 	local get_metal, get_energy, use_metal, use_energy
 
 	if metalStorage < 1 then
-		get_metal = metalPull >= metalIncome
-		use_metal = metalPull <= metalIncome
+		get_metal = metalExpense >= metalIncome
+		use_metal = metalExpense <= metalIncome
 	else
-		local future = max(0, min(metalStorage, metal + checkInterval * (metalIncome - metalPull) / FPS))
+		local future = max(0, min(metalStorage, metal + checkInterval * (metalIncome - metalExpense) / FPS))
 		-- Only get metal if we won't waste any metal by doing so.
 		local production = checkInterval * trackedUnit.reclaimSpeed / FPS
 		get_metal = future + production <= metalStorage
@@ -184,13 +216,16 @@ local function DecideCommands(unitID)
 	end
 
 	if energyStorage < 1 then
-		get_energy = energyPull >= energyIncome
-		use_energy = energyPull <= energyIncome
+		get_energy = energyExpense >= energyIncome
+		use_energy = energyExpense <= energyIncome
 	else
-		local future = energy + checkInterval * (energyIncome - energyPull) / FPS
-		-- Only get energy if we have storage for it.
+		local future = energy + checkInterval * (energyIncome - energyExpense) / FPS
+		-- Because there is no reclaim energy command, (the command will also
+		-- reclaim metal), only get energy if we won't exceed half of our storage.
+		-- That way we'll avoid energy stalls, but also avoid reclaiming metal if
+		-- we don't really need the energy right now.
 		local production = checkInterval * trackedUnit.reclaimSpeed / FPS
-		get_energy = future + production <= energyStorage
+		get_energy = future + production <= energyStorage / 2
 		-- Only use energy if we won't waste any build power by doing so. It
 		-- would go to overdrive, but it's better to keep reserves on the
 		-- ground.
@@ -212,17 +247,12 @@ local function DecideCommands(unitID)
 		commands[#commands + 1] = commandTables[REPAIR_UNITS]
 	end
 	if get_metal and get_energy then
-		if metal > energy then
-			commands[#commands + 1] = commandTables[RECLAIM_ENERGY]
-			commands[#commands + 1] = commandTables[RECLAIM_METAL]
-		else
-			commands[#commands + 1] = commandTables[RECLAIM_METAL]
-			commands[#commands + 1] = commandTables[RECLAIM_ENERGY]
-		end
+		commands[#commands + 1] = commandTables[RECLAIM_ALL]
 	elseif get_metal then
 		commands[#commands + 1] = commandTables[RECLAIM_METAL]
 	elseif get_energy then
-		commands[#commands + 1] = commandTables[RECLAIM_ENERGY]
+		-- There is no RECLAIM_ENERGY, unfortunately.
+		commands[#commands + 1] = commandTables[RECLAIM_ALL]
 	end
 
 	-- Queue up commands that would waste build power at the end, because build
@@ -245,15 +275,16 @@ end
 -- This code relies on implementation details of the spring engine, but I don't
 -- see any way around that.
 local remove_shift_internal = math.bit_inv(CMD_OPT_SHIFT + CMD_OPT_INTERNAL)
+local remove_control = math.bit_inv(CMD_OPT_CTRL)
 local function IssuedCausesCurrent(issued, currentID, currentOpt,
 		currentParam1, currentParam2, currentParam3, currentParam4, currentParam5)
-	--Log("compare")
-	--Log(" issued : ", issued[1], "(", issued[2][1], ", ", issued[2][2], ", ",
-	--	issued[2][3], ", ", issued[2][4], ", ", issued[2][5], ") ",
-	--	issued[3], " (", issued[4], ")")
-	--Log(" current: ", currentID, "(", currentParam1, ", ", currentParam2,
-	--	", ", currentParam3, ", ", currentParam4, ", ", currentParam5, ") ",
-	--	currentOpt)
+	Log("compare")
+	Log(" issued : ", issued[1], "(", issued[2][1], ", ", issued[2][2], ", ",
+		issued[2][3], ", ", issued[2][4], ", ", issued[2][5], ") ",
+		issued[3], " (", issued[4], ")")
+	Log(" current: ", currentID, "(", currentParam1, ", ", currentParam2,
+		", ", currentParam3, ", ", currentParam4, ", ", currentParam5, ") ",
+		currentOpt)
 
 	if not currentID or not issued then
 		return false
@@ -266,46 +297,42 @@ local function IssuedCausesCurrent(issued, currentID, currentOpt,
 			issued[2][3] == currentParam3 and
 			issued[2][4] == currentParam4 and
 			issued[2][5] == currentParam5 and
-			issued[3] == currentOpt then
-		--Log("    -> equal")
+			issued[3] == math.bit_and(currentOpt, remove_shift_internal) then
+		Log("    -> equal")
 		return true
 	end
 
-	-- Area repair/reclaim command. The spring engine puts the unit being
+	-- Area repair/reclaim commands. The spring engine puts the unit being
 	-- repaired/reclaimed as the first parameter, and moves the issued
 	-- parameters down one. (See CBuilderCAI::FindReclaimTargetAndReclaim() and
 	-- CBuilderCAI::FindRepairTargetAndRepair().)
-	if currentID == issued[1] and
-			(currentID == CMD_RECLAIM or currentID == CMD_REPAIR) and
-			#issued[2] == 4 and
-			issued[2][1] == currentParam2 and
-			issued[2][2] == currentParam3 and
-			issued[2][3] == currentParam4 and
-			issued[2][4] == currentParam5 and
-			issued[3] == math.bit_and(currentOpt, remove_shift_internal) then
-		return true
-	end
+	-- We explicitly ignore the options. The logic is hard to follow, and if the
+	-- command is a result of reclaim/repair with the exact area that we issued,
+	-- then that must be issued by our widget and not a user.
 
-	if issued[1] == CMD_PATROL then
-		-- Patrol commands are issued with a location, but that locations is
-		-- changed so we can't rely on it. Maybe it's getting changed because we
-		-- issue a location out of range or something. That might be fixable.
-		if (currentID == CMD_REPAIR or currentID == CMD_RECLAIM) and
-				currentOpt == CMD_OPT_INTERNAL and
-				currentParam5 ~= nil then
-			--Log("    -> patrol, repair")
+	if issued[1] == CMD_RECLAIM then
+		if currentID == CMD_RECLAIM and
+				#issued[2] == 4 and
+				issued[2][1] == currentParam2 and
+				issued[2][2] == currentParam3 and
+				issued[2][3] == currentParam4 and
+				issued[2][4] == currentParam5 then
+			Log("    -> reclaim")
 			return true
-		elseif currentID == CMD_PATROL then
-			--Log("    -> patrol")
-			return true
-		elseif currentID == CMD_FIGHT and
-				currentOpt == CMD_OPT_INTERNAL then
-			--Log("    -> patrol, fight")
+		end
+	elseif issued[1] == CMD_REPAIR then
+		if currentID == CMD_REPAIR and
+				#issued[2] == 4 and
+				issued[2][1] == currentParam2 and
+				issued[2][2] == currentParam3 and
+				issued[2][3] == currentParam4 and
+				issued[2][4] == currentParam5 then
+			Log("    -> repair")
 			return true
 		end
 	end
 
-	--Log("    -> false")
+	Log("    -> false")
 	return false
 end
 
@@ -327,8 +354,8 @@ local function unitNew(unitID)
 	-- the range giant so that when you hold down shift you don't see circles
 	-- around every caretaker.
 	local area = {x, y, z, 50000}
+	commandTables[RECLAIM_ALL] = {CMD_RECLAIM, area, CMD_OPT_CTRL, "reclaim all"}
 	commandTables[RECLAIM_METAL] = {CMD_RECLAIM, area, 0, "reclaim metal"}
-	commandTables[RECLAIM_ENERGY] = {CMD_RECLAIM, area, CMD_OPT_CTRL, "reclaim energy"}
 	commandTables[REPAIR_UNITS] = {CMD_REPAIR, area, CMD_OPT_META, "repair units"}
 	commandTables[BUILD_ASSIST] = {CMD_REPAIR, area, 0, "build assist"}
 
@@ -351,14 +378,14 @@ local function unitString(unit)
 			", cF=" .. unit.checkFrame .. ", rI=" .. unit.resetIdle .. ")"
 end
 
-local function SetupUnit(unitID)
-	trackedUnits[unitID] = trackedUnits[unitID] or unitNew(unitID)
-
+local function UpdateUnit(unitID)
 	local trackedUnit = trackedUnits[unitID]
 
 	trackedUnit.checkFrame = currentFrame + RandomInterval(checkInterval)
 	queue:push({trackedUnit.checkFrame, unitID})
-	--Log(unitID, "; push for ", trackedUnit.checkFrame)
+	if debug then
+		Log(unitID, "; push for ", trackedUnit.checkFrame)
+	end
 
 	local cmds = DecideCommands(unitID)
 
@@ -381,7 +408,9 @@ local function SetupUnit(unitID)
 				currentParam4, currentParam5) then
 			-- The unit is doing something that could be caused by the top command
 			-- we were going to issue. That's good enough.
-			--Log("Unit is doing good work. Don't touch it.")
+			if debug then
+				Log(unitID, "; Unit is doing good work. Don't touch it.")
+			end
 			return
 		end
 
@@ -400,13 +429,16 @@ local function SetupUnit(unitID)
 		if not isIssued then
 			-- Unit is doing something we never asked for. Must have been commanded
 			-- by a user.
-			--Log(unitID, " was commanded ", currentID, "(",
-			--	currentParam1, ", ",
-			--	currentParam2, ", ",
-			--	currentParam3, ", ",
-			--	currentParam4, ", ",
-			--	currentParam5, ") ", currentOpt)
-			--Log("Ignore unit ", unitID, " until it becomes idle.")
+			if debug then
+				Log(unitID, "; was commanded ", currentID, "(",
+					currentParam1, ", ",
+					currentParam2, ", ",
+					currentParam3, ", ",
+					currentParam4, ", ",
+					currentParam5, ") ", currentOpt)
+				Log(unitID, "; Ignore until it becomes idle (commanded).")
+				mapEcho(unitID, "Ignore until idle")
+			end
 			trackedUnits[unitID] = nil
 			return
 		end
@@ -430,6 +462,18 @@ local function SetupUnit(unitID)
 		end
 	end
 	trackedUnit.commands = cmds
+end
+
+local function SetupUnit(unitID)
+	trackedUnits[unitID] = trackedUnits[unitID] or unitNew(unitID)
+
+	-- health, maxHealth, paralyzeDamage, captureProress, buildProgress
+	local _, _, _, _, buildProgress = spGetUnitHealth(unitID)
+	if buildProgress >= 1 then
+		UpdateUnit(unitID)
+	end
+	-- If the unit isn't done building, we'll hear about it when it becomes idle
+	-- in UnitIdle().
 end
 
 local function SetupAll()
@@ -481,6 +525,11 @@ options = {
 -- Callins
 
 function widget:Initialize()
+	if (Spring.GetSpectatingState() or Spring.IsReplay()) and (not Spring.IsCheatingEnabled()) then
+		Spring.Echo("uapn2 disabled for spectators")
+		widgetHandler:RemoveWidget()
+	end
+
 	SetupAll()
 end
 
@@ -489,6 +538,10 @@ function widget:UnitCreated(unitID, unitDefID, unitTeam)
 			or not IsImmobileBuilder(UnitDefs[unitDefID])
 			or spGetGameRulesParam("loadPurge") == 1 then
 		return
+	end
+
+	if debug then
+		Log(unitID, "; created")
 	end
 
 	SetupUnit(unitID)
@@ -517,6 +570,15 @@ end
 -- But does not get called when patrol or area reclaim/repair commands modify
 -- the command queue.
 function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOptions)
+	if debug and
+			unitTeam == spGetMyTeamID() and
+			not spGetGameRulesParam("loadPurge") and
+			IsImmobileBuilder(UnitDefs[unitDefID]) then
+		Log("UnitCommand ", unitID, ": ", cmdID, " (", cmdParams[1], ", ",
+				cmdParams[2], ", ", cmdParams[3], ", ", cmdParams[4],
+				", ", cmdParams[5], ") ", OptionValue(cmdOptions))
+	end
+
 	if not enableIdleNanos
 			or cmdOptions.internal
 			or unitTeam ~= spGetMyTeamID()
@@ -529,11 +591,13 @@ function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOp
 		if cmdID == CMD_STOP then
 			if not stoppedUnit[unitID] then
 				Log("Ignore unit ", unitID, " until it is given a command.")
+				mapEcho(unitID, "Ignore until idle (stopped).")
 			end
 			stoppedUnit[unitID] = true
 		elseif stoppedUnit[unitID] then
 			if stoppedUnit[unitID] ~= nil then
 				Log("Pay attention to unit ", unitID, " again.")
+				mapClear(unitID)
 			end
 			stoppedUnit[unitID] = nil
 		end
@@ -541,7 +605,26 @@ function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOp
 end
 
 function widget:UnitGiven(unitID, unitDefID, unitTeam)
+	if debug then
+		Log(unitID, "; given")
+	end
 	widget:UnitCreated(unitID, unitDefID, unitTeam)
+end
+
+function widget:UnitFinished(unitID, unitDefID, unitTeam)
+	if not enableIdleNanos or stoppedUnit[unitID]
+			or unitTeam ~= spGetMyTeamID()
+			or not IsImmobileBuilder(UnitDefs[unitDefID])
+			or spGetGameRulesParam("loadPurge") == 1 then
+		return
+	end
+
+	if trackedUnits[unitID] then
+		if debug then
+			Log(unitID, "; finished")
+		end
+		UpdateUnit(unitID)
+	end
 end
 
 function widget:UnitIdle(unitID, unitDefID, unitTeam)
@@ -562,6 +645,8 @@ function widget:UnitIdle(unitID, unitDefID, unitTeam)
 
 	if not trackedUnits[unitID] then
 		trackedUnits[unitID] = unitNew(unitID)
+		Log("Pay attention to unit ", unitID, " again.")
+		mapClear(unitID)
 	end
 	local trackedUnit = trackedUnits[unitID]
 
@@ -573,7 +658,7 @@ function widget:UnitIdle(unitID, unitDefID, unitTeam)
 	trackedUnit.idleAt = currentFrame
 
 	if debug then
-		Log("UnitIdle(", unitString(trackedUnit), ")")
+		Log(unitID, "; UnitIdle(", unitString(trackedUnit), ")")
 	end
 	--TableEcho(trackedUnits[unitID], "- ")
 
@@ -585,7 +670,9 @@ function widget:UnitIdle(unitID, unitDefID, unitTeam)
 	-- If we're not idle at that point, we must have found some work to do.
 	trackedUnit.resetIdle = trackedUnit.checkFrame + 1
 	queue:push({trackedUnit.checkFrame, unitID})
-	--Log(unitID, "; push for ", trackedUnit.checkFrame)
+	if debug then
+		Log(unitID, "; push for ", trackedUnit.checkFrame)
+	end
 end
 
 -- Called for every game simulation frame (30 per second).
@@ -613,7 +700,7 @@ function widget:GameFrame(frame)
 					-- stale entry from the queue.
 
 					if spValidUnitID(unitID) then
-						SetupUnit(unitID)
+						UpdateUnit(unitID)
 					else
 						trackedUnits[unitID] = nil
 					end

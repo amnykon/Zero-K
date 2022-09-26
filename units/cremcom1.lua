@@ -42,8 +42,6 @@ return { cremcom1 = {
   footprintX             = 2,
   footprintZ             = 2,
   iconType               = [[commander1]],
-  idleAutoHeal           = 5,
-  idleTime               = 1800,
   leaveTracks            = true,
   losEmitHeight       = 40,
   maxDamage              = 2500,
@@ -52,7 +50,6 @@ return { cremcom1 = {
   maxWaterDepth          = 5000,
   metalMake              = 4,
   metalStorage           = 500,
-  minCloakDistance       = 75,
   modelCenterOffset      = [[0 1 0]],
   movementClass          = [[AKBOT2]],
   noChaseCategory        = [[TERRAFORM SATELLITE FIXEDWING GUNSHIP HOVER SHIP SWIM SUB LAND FLOAT SINK TURRET]],
@@ -116,7 +113,6 @@ return { cremcom1 = {
 
       damage                  = {
         default = 0,
-        subs    = 0,
       },
 
       duration                = 0.11,
@@ -158,7 +154,6 @@ return { cremcom1 = {
 
       damage                  = {
         default = 16.5,
-        subs    = 8.25,
       },
 
       duration                = 0.1,

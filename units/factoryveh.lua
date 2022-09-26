@@ -2,8 +2,6 @@ return { factoryveh = {
   unitname                      = [[factoryveh]],
   name                          = [[Rover Assembly]],
   description                   = [[Produces Rovers]],
-  acceleration                  = 0,
-  brakeRate                     = 0,
   buildCostMetal                = Shared.FACTORY_COST,
   buildDistance                 = Shared.FACTORY_PLATE_RANGE,
   builder                       = true,
@@ -38,6 +36,7 @@ return { factoryveh = {
   corpse                        = [[DEAD]],
 
   customParams                  = {
+    ploppable = 1,
     sortName       = [[2]],
     default_spacing = 8,
 
@@ -50,6 +49,10 @@ return { factoryveh = {
     factorytab       = 1,
     shared_energy_gen = 1,
     parent_of_plate   = [[plateveh]],
+
+    outline_x = 250,
+    outline_y = 250,
+    outline_yoff = 5,
   },
 
   energyUse                     = 0,
@@ -57,14 +60,11 @@ return { factoryveh = {
   footprintX                    = 8,
   footprintZ                    = 8,
   iconType                      = [[facvehicle]],
-  idleAutoHeal                  = 5,
-  idleTime                      = 1800,
   levelGround                   = false,
   maxDamage                     = 4000,
   maxSlope                      = 15,
   maxVelocity                   = 0,
   maxWaterDepth                 = 0,
-  minCloakDistance              = 150,
   moveState                     = 1,
   noAutoFire                    = false,
   objectName                    = [[factoryveh.dae]],
@@ -72,7 +72,6 @@ return { factoryveh = {
   selfDestructAs                = [[LARGE_BUILDINGEX]],
   showNanoSpray                 = false,
   sightDistance                 = 273,
-  turnRate                      = 0,
   useBuildingGroundDecal        = true,
   workerTime                    = Shared.FACTORY_BUILDPOWER,
   yardMap                       = "oooooooo oooooooo oooooooo yccccccy yccccccy yccccccy yccccccy yccccccy",

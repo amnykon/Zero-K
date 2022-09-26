@@ -136,10 +136,10 @@ options = {
 local hotkeyDefaults = {
 	levelPresets = {0, -8, -20, -24},
 	levelTypePreset = {0, 0, 0, 0},
-	raisePresets = {12, 24, 40, 240, -120},
-	raiseTypePreset = {1, 1, 1},
+	raisePresets = {12, 24, 46, 240, -120, 96},
+	raiseTypePreset = {1, 1, 1, 0, 0, 1},
 	levelCursorHotkey = {"alt+g"},
-	raiseHotkey = {"alt+v", "alt+b", "alt+n", "alt+h", "alt+j"},
+	raiseHotkey = {"alt+v", "alt+b", "alt+n", "alt+h", "alt+j", "alt+m"},
 }
 
 ---------------------------------
@@ -180,7 +180,9 @@ local posVolume   = {0, 1, 0, 0.1} -- posisive volume
 local groundGridColor  = {0.3, 0.2, 1, 0.8} -- grid representing new ground height
 
 -- colour of lasso during drawing
-local lassoColor = {0.2, 1.0, 0.2, 1.0}
+local lassoColorGood = {0.2, 1.0, 0.2, 1.0}
+local lassoColorBad  = {1.0, 0.2, 0.2, 1.0}
+local lassoColorCurrent = lassoColorGood
 
 -- colour of ramp
 local vehPathingColor = {0.2, 1.0, 0.2, 1.0}
@@ -1069,8 +1071,6 @@ function widget:MousePress(mx, my, button)
 		spSetActiveCommand(index)
 		currentlyActiveCommand = CMD_LEVEL
 		
-		local mx,my = spGetMouseState()
-		
 		setHeight = true
 		drawingRectangle = false
 		placingRectangle = false
@@ -1117,7 +1117,7 @@ function widget:MousePress(mx, my, button)
 	end
 	
 	local toolTip = Spring.GetCurrentTooltip()
-	if not (toolTip == "" or st_find(toolTip, "TechLevel") or st_find(toolTip, "Terrain type") or st_find(toolTip, "Metal:")) then
+	if not (toolTip == "" or st_find(toolTip, "Terrain type") or st_find(toolTip, "Metal:")) then
 		return false
 	end
 	
@@ -1290,6 +1290,13 @@ function widget:MouseMove(mx, my, dx, dy, button)
 					end
 					point[2].z = z
 					point[3].z = point[1].z+16
+				end
+
+				if abs(point[2].x - point[3].x) > maxAreaSize
+				or abs(point[2].z - point[3].z) > maxAreaSize then
+					lassoColorCurrent = lassoColorBad
+				else
+					lassoColorCurrent = lassoColorGood
 				end
 			end
 		end
@@ -2111,10 +2118,10 @@ function widget:DrawWorld()
 			
 			--glDepthTest(false)
 		elseif drawingLasso then
-			glColor(lassoColor)
+			glColor(lassoColorGood)
 			glBeginEnd(GL_LINE_STRIP, DrawLine)
 		elseif drawingRectangle or (placingRectangle and placingRectangle.legalPos) then
-			glColor(lassoColor)
+			glColor(lassoColorCurrent)
 			glBeginEnd(GL_LINE_STRIP, DrawRectangleLine)
 			local a,c,m,s = spGetModKeyState()
 			if c then

@@ -37,7 +37,8 @@ return { factoryamph = {
   corpse           = [[DEAD]],
 
   customParams     = {
-    modelradius    = [[60]],
+    ploppable = 1,
+    modelradius    = [[42]],
     aimposoffset   = [[0 0 -26]],
     midposoffset   = [[0 0 -10]],
     sortName = [[8]],
@@ -49,6 +50,10 @@ return { factoryamph = {
     shared_energy_gen = 1,
     cus_noflashlight = 1,
     parent_of_plate   = [[plateamph]],
+
+    outline_x = 250,
+    outline_y = 250,
+    outline_yoff = 5,
   },
 
   energyUse        = 0,
@@ -56,11 +61,8 @@ return { factoryamph = {
   footprintX       = 7,
   footprintZ       = 7,
   iconType         = [[facamph]],
-  idleAutoHeal     = 5,
-  idleTime         = 1800,
   maxDamage        = 4000,
   maxSlope         = 15,
-  minCloakDistance = 150,
   moveState        = 1,
   noAutoFire       = false,
   objectName       = [[factory2.s3o]],

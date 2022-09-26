@@ -47,8 +47,6 @@ return { commrecon1 = {
   footprintX          = 2,
   footprintZ          = 2,
   iconType            = [[commander1]],
-  idleAutoHeal        = 5,
-  idleTime            = 1800,
   leaveTracks         = true,
   losEmitHeight       = 40,
   maxDamage           = 1650,
@@ -57,7 +55,6 @@ return { commrecon1 = {
   maxWaterDepth       = 5000,
   metalMake           = 4,
   metalStorage        = 500,
-  minCloakDistance    = 75,
   movementClass       = [[AKBOT2]],
   noChaseCategory     = [[TERRAFORM SATELLITE FIXEDWING GUNSHIP HOVER SHIP SWIM SUB LAND FLOAT SINK TURRET]],
   objectName          = [[commrecon.s3o]],
@@ -159,11 +156,12 @@ return { commrecon1 = {
       craterMult              = 0,
 
       customParams            = {
-        timeslow_preset = [[commrecon_slowbeam]],
+        timeslow_onlyslow = 1,
+        timeslow_smartretarget = 0.33,
       },
 
       damage                  = {
-        default = 225,
+        default = 450,
       },
 
       explosionGenerator      = [[custom:flashslow]],

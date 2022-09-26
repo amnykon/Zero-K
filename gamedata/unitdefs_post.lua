@@ -12,7 +12,6 @@ Spring.Echo("Loading UnitDefs_posts")
 --
 
 VFS.Include("LuaRules/Configs/constants.lua")
-local TRANSPORT_LIGHT_COST_MAX = 1000
 
 --------------------------------------------------------------------------------
 --------------------------------------------------------------------------------
@@ -94,9 +93,9 @@ end
 
 do
 	local append = false
-	local name = "tweakunits"
-	while modOptions[name] and modOptions[name] ~= "" do
-		local tweaks = Spring.Utilities.CustomKeyToUsefulTable(modOptions[name])
+	local modoptName = "tweakunits"
+	while modOptions[modoptName] and modOptions[modoptName] ~= "" do
+		local tweaks = Spring.Utilities.CustomKeyToUsefulTable(modOptions[modoptName])
 		if type(tweaks) == "table" then
 			Spring.Echo("Loading tweakunits modoption", append or 0)
 			for name, ud in pairs(UnitDefs) do
@@ -107,7 +106,7 @@ do
 			end
 		end
 		append = (append or 0) + 1
-		name = "tweakunits" .. append
+		modoptName = "tweakunits" .. append
 	end
 end
 
@@ -228,7 +227,6 @@ for i = 1, #typeNames do
 end
 
 -- Set build options from pos_ customparam
-local buildOpts = VFS.Include("gamedata/buildoptions.lua")
 for name, ud in pairs(UnitDefs) do
 	local cp = ud.customparams
 	for i = 1, #typeNamesLower do
@@ -259,13 +257,20 @@ end
 --
 
 local sqrt = math.sqrt
-
+local cloakFootMult = 6 * sqrt(2)
 for name, ud in pairs(UnitDefs) do
+	local fx = ud.customparams.decloak_footprint or (ud.footprintx and tonumber(ud.footprintx) or 1)
+	local fz = ud.customparams.decloak_footprint or (ud.footprintz and tonumber(ud.footprintz) or 1)
+	-- Note that the full power of this equation is never used in practise, since units have square
+	-- footprints and most structures don't cloak (the ones that do have square footprints).
+	local radius = cloakFootMult * sqrt((fx * fx) + (fz * fz)) + 56
+	-- 2x2 = 80
+	-- 3x3 = 92
+	-- 4x4 = 104
 	if (not ud.mincloakdistance) then
-		local fx = ud.footprintx and tonumber(ud.footprintx) or 1
-		local fz = ud.footprintz and tonumber(ud.footprintz) or 1
-		local radius = 8 * sqrt((fx * fx) + (fz * fz))
-		ud.mincloakdistance = (radius + 48)
+		ud.mincloakdistance = radius
+	elseif radius < ud.mincloakdistance then
+		ud.customparams.cloaker_bestowed_radius = radius
 	end
 end
 
@@ -470,6 +475,20 @@ end
 
 --------------------------------------------------------------------------------
 --------------------------------------------------------------------------------
+-- Resurrect
+--
+
+if (modOptions and (modOptions.disableresurrect == 1 or modOptions.disableresurrect == "1")) then
+	for name, unitDef in pairs(UnitDefs) do
+		if (unitDef.canresurrect) then
+			unitDef.canresurrect = false
+		end
+	end
+
+end
+
+--------------------------------------------------------------------------------
+--------------------------------------------------------------------------------
 -- unitspeedmult
 --
 
@@ -501,13 +520,13 @@ if (modOptions and modOptions.damagemult and modOptions.damagemult ~= 1) then
 			unitDef.idleautoheal = unitDef.idleautoheal * damagemult
 		end
 		
-		if (unitDef.capturespeed) then 
+		if (unitDef.capturespeed) then
 			unitDef.capturespeed = unitDef.capturespeed * damagemult
 		elseif (unitDef.workertime) then
 			unitDef.capturespeed = unitDef.workertime * damagemult
 		end
 		
-		if (unitDef.repairspeed) then 
+		if (unitDef.repairspeed) then
 			unitDef.repairspeed = unitDef.repairspeed * damagemult
 		elseif (unitDef.workertime) then
 			unitDef.repairspeed = unitDef.workertime * damagemult
@@ -520,15 +539,20 @@ end
 -- Set turnInPlace speed limits, reverse velocities (but not for ships)
 --
 for name, ud in pairs(UnitDefs) do
-	if ud.turnrate and (ud.turnrate > 600 or ud.customparams.turnatfullspeed) then
-		ud.turninplace = false
-		ud.turninplacespeedlimit = (ud.maxvelocity or 0)
-	elseif ud.turninplace ~= true then
-		ud.turninplace = false	-- true
-		ud.turninplacespeedlimit = ud.turninplacespeedlimit or (ud.maxvelocity and ud.maxvelocity*0.6 or 0)
-		--ud.turninplaceanglelimit = 180
+	if ud.turnrate then
+		if ud.customparams.turnatfullspeed_hover then
+			ud.turninplace = false
+			ud.turninplacespeedlimit = (ud.maxvelocity or 0)*(ud.customparams.boost_speed_mult or 0.8)
+			ud.turninplaceanglelimit = 90
+		elseif (ud.turnrate > 600 or ud.customparams.turnatfullspeed) then
+			ud.turninplace = false
+			ud.turninplacespeedlimit = (ud.maxvelocity or 0)
+		elseif ud.turninplace ~= true then
+			ud.turninplace = false -- true
+			ud.turninplacespeedlimit = ud.turninplacespeedlimit or (ud.maxvelocity and ud.maxvelocity*0.6 or 0)
+			--ud.turninplaceanglelimit = 180
+		end
 	end
-
 
 	if ud.category and not (ud.category:find("SHIP", 1, true) or ud.category:find("SUB", 1, true)) then
 		if (ud.maxvelocity) and not ud.maxreversevelocity then
@@ -935,8 +959,13 @@ end
 if Utilities.IsCurrentVersionNewerThan(104, 600) then
 	for name, ud in pairs (UnitDefs) do
 		ud.transportmass = nil
-		if ud.buildcostmetal and tonumber(ud.buildcostmetal) > TRANSPORT_LIGHT_COST_MAX then
-			ud.customparams.requireheavytrans = 1
+		local buildCost = ud.buildcostmetal and tonumber(ud.buildcostmetal)
+		if buildCost then
+			if buildCost > TRANSPORT_MEDIUM_COST_MAX then
+				ud.customparams.requireheavytrans = 1
+			elseif buildCost > TRANSPORT_LIGHT_COST_MAX then
+				ud.customparams.requiremediumtrans = 1
+			end
 		end
 	end
 else
@@ -957,5 +986,7 @@ end
 
 local ai_start_units = VFS.Include("LuaRules/Configs/ai_commanders.lua")
 for i = 1, #ai_start_units do
-	UnitDefs[ai_start_units[i]].customparams.ai_start_unit = true
+	if UnitDefs[ai_start_units[i]] then -- valid entries can still be nil in wiki exporter script
+		UnitDefs[ai_start_units[i]].customparams.ai_start_unit = true
+	end
 end

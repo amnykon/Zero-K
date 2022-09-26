@@ -1,7 +1,7 @@
 return { gunshipcon = {
   unitname            = [[gunshipcon]],
   name                = [[Wasp]],
-  description         = [[Heavy Construction Aircraft]],
+  description         = [[Heavy Gunship Constructor]],
   acceleration        = 0.1,
   airStrafe           = 0,
   brakeRate           = 0.08,
@@ -36,6 +36,10 @@ return { gunshipcon = {
     aimposoffset   = [[0 35 0]],
     midposoffset   = [[0 35 0]],
     custom_height  = [[55]],
+
+    outline_x = 105,
+    outline_y = 105,
+    outline_yoff = 25,
   },
 
   energyUse           = 0,
@@ -45,11 +49,8 @@ return { gunshipcon = {
   footprintZ          = 2,
   hoverAttack         = true,
   iconType            = [[builderair]],
-  idleAutoHeal        = 5,
-  idleTime            = 1800,
   maxDamage           = 1500,
   maxVelocity         = 2.4,
-  minCloakDistance    = 75,
   noAutoFire          = false,
   noChaseCategory     = [[TERRAFORM SATELLITE FIXEDWING GUNSHIP HOVER SHIP SWIM SUB LAND FLOAT SINK TURRET]],
   objectName          = [[bumblebee.dae]],
@@ -58,7 +59,7 @@ return { gunshipcon = {
   showNanoSpray       = false,
   sightDistance       = 375,
   turnRate            = 500,
-  workerTime          = 7.5,
+  workerTime          = 10,
 
   featureDefs         = {
 

@@ -1,7 +1,5 @@
 include "constants.lua"
 
-local spSetUnitShieldState = Spring.SetUnitShieldState
-
 --------------------------------------------------------------------------------
 -- pieces
 --------------------------------------------------------------------------------
@@ -241,14 +239,6 @@ function script.AimWeapon(num, heading, pitch)
 	return false
 end
 
-function script.Activate()
-	--spSetUnitShieldState(unitID, true)
-end
-
-function script.Deactivate()
-	--spSetUnitShieldState(unitID, false)
-end
-
 function script.FireWeapon(num)
 	if num == 5 then
 		EmitSfx(lfirept, 1024)
@@ -278,11 +268,6 @@ function script.StartBuilding(heading, pitch)
 	end
 	restoreHeading, restorePitch = heading, pitch
 	SetUnitValue(COB.INBUILDSTANCE, 1)
-end
-
-function script.QueryNanoPiece()
-	GG.LUPS.QueryNanoPiece(unitID,unitDefID,Spring.GetUnitTeam(unitID),nanospray)
-	return nanospray
 end
 
 function script.Killed(recentDamage, maxHealth)

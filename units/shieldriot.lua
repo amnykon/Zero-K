@@ -5,7 +5,7 @@ return { shieldriot = {
   acceleration           = 0.75,
   activateWhenBuilt      = true,
   brakeRate              = 4.5,
-  buildCostMetal         = 260,
+  buildCostMetal         = 250,
   buildPic               = [[shieldriot.png]],
   canGuard               = true,
   canMove                = true,
@@ -18,20 +18,21 @@ return { shieldriot = {
 
   customParams           = {
     selection_scale   = 0.85,
+
+    outline_x = 80,
+    outline_y = 80,
+    outline_yoff = 15.5,
   },
 
   explodeAs              = [[BIG_UNITEX]],
   footprintX             = 3,
   footprintZ             = 3,
   iconType               = [[walkerriot]],
-  idleAutoHeal           = 5,
-  idleTime               = 1800,
   leaveTracks            = true,
-  maxDamage              = 1050,
+  maxDamage              = 1100,
   maxSlope               = 36,
-  maxVelocity            = 1.9,
+  maxVelocity            = 2,
   maxWaterDepth          = 22,
-  minCloakDistance       = 75,
   movementClass          = [[KBOT3]],
   noChaseCategory        = [[TERRAFORM FIXEDWING GUNSHIP SUB]],
   objectName             = [[behethud.s3o]],
@@ -91,9 +92,8 @@ return { shieldriot = {
       craterMult              = 0,
 
       damage                  = {
-        default = 23,
-        planes  = 23,
-        subs    = 0.1,
+        default = 30,
+        planes  = 30,
       },
 
       customParams           = {
@@ -101,7 +101,7 @@ return { shieldriot = {
         lups_explodespeed = 1,
         lups_explodelife = 0.6,
         nofriendlyfire = 1,
-        timeslow_damagefactor = 3,
+        timeslow_damagefactor = 2.5,
       },
 
       edgeeffectiveness       = 0.6,
@@ -130,7 +130,6 @@ return { shieldriot = {
       damage                  = {
         default = 1E-06,
         planes  = 1E-06,
-        subs    = 5E-08,
       },
 
       explosionGenerator      = [[custom:NONE]],
@@ -168,7 +167,6 @@ return { shieldriot = {
       damage                  = {
         default = 1E-06,
         planes  = 1E-06,
-        subs    = 5E-08,
       },
 
       explosionGenerator      = [[custom:NONE]],

@@ -30,7 +30,6 @@ return { chicken_digger = {
   maxSlope            = 36,
   maxVelocity         = 3,
   maxWaterDepth       = 22,
-  minCloakDistance    = 75,
   movementClass       = [[KBOT2]],
   noAutoFire          = false,
   noChaseCategory     = [[TERRAFORM FIXEDWING SATELLITE GUNSHIP]],
@@ -83,7 +82,6 @@ return { chicken_digger = {
       damage                  = {
         default = 40,
         planes  = 40,
-        subs    = 40,
       },
 
       explosionGenerator      = [[custom:NONE]],

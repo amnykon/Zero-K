@@ -247,10 +247,6 @@ local icontypes = {
     bitmap='icons/vehiclelrarty.dds',
     size=2.2,
   },
-  vehicleaa = {
-    bitmap='icons/vehicleaa.dds',
-    size=1.8,
-  },
 
   --walkers
   walkerjammer = {
@@ -319,7 +315,7 @@ local icontypes = {
   },
   amphsupport = {
     bitmap='icons/amphsupport.png',
-    size=1.8,
+    size=1.9,
   },
   amphassault = {
     bitmap='icons/amphassault.png',
@@ -631,11 +627,11 @@ local icontypes = {
   },
   t3builder = {
     bitmap='icons/t3builder.dds',
-    size=2,
+    size=1.8,
   },
   staticbuilder = {
     bitmap='icons/staticbuilder.dds',
-    size=1,
+    size=1.5,
   },
   t3hub = {
     bitmap='icons/t3hub.dds',
@@ -733,7 +729,7 @@ local icontypes = {
   },
   advradar = {
     bitmap='icons/radar.dds',
-    size=2.8,
+    size=2.5,
   },
    sonar = {
     bitmap='icons/sonar.dds',
@@ -919,17 +915,6 @@ local icontypes = {
     bitmap='icons/airbomb.dds',
 	distance=0.5,
     size=1.6,
-  },
-
-  --spec ops
-  t3builder = {
-    bitmap='icons/t3builder.dds',
-    size=1.8,
-  },
-  --nanos
-  staticbuilder = {
-    bitmap='icons/staticbuilder.dds',
-    size=1.5,
   },
 
   --ship icons

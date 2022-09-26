@@ -11,6 +11,7 @@ function widget:GetInfo()
 end
 
 VFS.Include("LuaRules/Configs/customcmds.h.lua")
+VFS.Include("LuaRules/Configs/constants.lua")
 include("Widgets/COFCTools/ExportUtilities.lua")
 
 --// gl const
@@ -59,6 +60,9 @@ local usingNewEngine = (#{Spring.GetLosViewColors()} == 5) -- newer engine has r
 --local init = true
 
 WG.MinimapDraggingCamera = false --Boolean, false if selection through minimap is possible
+
+local vsx,vsy --Spring.GetViewSizes()
+local cs
 
 local fogBrightnessMin = 0
 local fogBrightnessMax = 1
@@ -622,11 +626,19 @@ function setSensorState(newState)
 	end
 end
 
+function widget:ViewResize(vsx,vsy)
+	vsx,vsy = Spring.GetViewSizes()
+	cs = Spring.GetCameraState()
+end
+
 local firstUpdate = true
 local updateRunOnceRan = false
 
 function widget:Update() --Note: these run-once codes is put here (instead of in Initialize) because we are waiting for epicMenu to initialize the "options" value first.
 	if firstUpdate then
+		vsx,vsy = Spring.GetViewSizes()
+		cs = Spring.GetCameraState()
+
 		firstUpdate = false
 		return
 	end
@@ -639,10 +651,11 @@ function widget:Update() --Note: these run-once codes is put here (instead of in
 		options.use_map_ratio.OnChange(options.use_map_ratio) -- Wait for docking to provide saved window size
 		updateRunOnceRan = true
 	end
-	if not window then return end
+	if not window or (Spring.GetGameFrame()%TEAM_SLOWUPDATE_RATE ~= 0) then return end 
 
 	if not options.hideOnOverview.value then
-		local cs = Spring.GetCameraState()
+		vsx,vsy = Spring.GetViewSizes()
+		cs = Spring.GetCameraState()
 		if cs.name == "ov" and not tabbedMode then
 			Chili.Screen0:RemoveChild(window)
 			tabbedMode = true
@@ -682,7 +695,7 @@ local function MakeMinimapButton(file, params)
 		
 	return Chili.Button:New{
 		height=iconsize, width=iconsize,
-		caption="",
+		noFont = true,
 		margin={0,0,0,0},
 		padding={2,2,2,2},
 		tooltip = (name .. desc .. hotkey ),
@@ -766,6 +779,7 @@ MakeMinimapWindow = function()
 		bottom = map_panel_bottom,
 		right = map_panel_right,
 		
+		noFont = true,
 		margin = {0,0,0,0},
 		padding = {8,8,8,8},
 		backgroundColor = bgColor_panel,
@@ -792,7 +806,7 @@ MakeMinimapWindow = function()
 		children = {
 			Chili.Button:New{
 				height=iconsize, width=iconsize,
-				caption="",
+				noFont=true,
 				margin={0,0,0,0},
 				padding={2,2,2,2},
 				tooltip = "Toggle simplified teamcolours",
@@ -810,25 +824,36 @@ MakeMinimapWindow = function()
 			
 			MakeMinimapButton( 'LuaUI/images/map/fow.png', {option = 'viewfow'} ),
 			
-			Chili.Label:New{ width=iconsize/2, height=iconsize/2, caption='', autosize = false,},
+			Chili.Label:New{
+				width=iconsize/2, height=iconsize/2, caption='', autosize = false,
+				objectOverrideFont = WG.GetFont(),
+			},
 			
 			MakeMinimapButton( nil, {option = 'viewstandard'} ),
 			MakeMinimapButton( 'LuaUI/images/map/heightmap.png', {option = 'viewheightmap'} ),
 			MakeMinimapButton( 'LuaUI/images/map/blockmap.png', {option = 'viewblockmap'} ),
 			MakeMinimapButton( 'LuaUI/images/map/metalmap.png', {name = "Toggle Eco Display", action = 'showeco', desc = " (show metal, geo spots and pylon fields)"}),	-- handled differently because command is registered in another widget
 			
-			Chili.Label:New{ width=iconsize/2, height=iconsize/2, caption='', autosize = false,},
+			Chili.Label:New{
+				width=iconsize/2, height=iconsize/2, caption='', autosize = false,
+				objectOverrideFont = WG.GetFont(),
+			},
 			
 			MakeMinimapButton( 'LuaUI/images/commands/Bold/retreat.png', {name = "Place Retreat Zone", action = 'sethaven', command = CMD_RETREAT_ZONE, desc = " (Shift to place multiple zones, overlap to remove)"}),
 			MakeMinimapButton( 'LuaUI/images/commands/Bold/ferry.png', {name = "Place Ferry Route", action = 'setferry', command = CMD_SET_FERRY, desc = " (Shift to queue and edit waypoints, overlap the start to remove)"}),
 			
-			Chili.Label:New{ width=iconsize/2, height=iconsize/2, caption='', autosize = false,},
+			Chili.Label:New{
+				width=iconsize/2, height=iconsize/2, caption='', autosize = false,
+				objectOverrideFont = WG.GetFont(),
+			},
 			
 			MakeMinimapButton( 'LuaUI/images/drawingcursors/eraser.png', {option = 'clearmapmarks'} ),
 			MakeMinimapButton( 'LuaUI/images/Crystal_Clear_action_flag.png', {option = 'lastmsgpos'} ),
 			
-			Chili.Label:New{ width=iconsize/2, height=iconsize/2, caption='', autosize = false,},
-			
+			Chili.Label:New{
+				width=iconsize/2, height=iconsize/2, caption='', autosize = false,
+				objectOverrideFont = WG.GetFont(),
+			},
 		},
 	}
 	
@@ -836,6 +861,7 @@ MakeMinimapWindow = function()
 		parent = Chili.Screen0,
 		name   = 'Minimap Window', -- NB: this exact string is expected by other code
 		color = {0, 0, 0, 0},
+		noFont=true,
 		padding = {0, 0, 0, 0},
 		width = (window and window.width) or width,
 		height = (window and window.height) or height,
@@ -979,9 +1005,9 @@ function widget:Initialize()
 
 		gl.DeleteTextureFBO(offscreentex or 0)
 
-		local vsx,vsy = gl.GetViewSizes()
-		if vsx > 0 and vsy > 0 then
-			offscreentex = gl.CreateTexture(vsx,vsy, {
+		local sx,sy = gl.GetViewSizes()
+		if sx > 0 and sy > 0 then
+			offscreentex = gl.CreateTexture(sx,sy, {
 				border = false,
 				min_filter = GL.LINEAR,
 				mag_filter = GL.LINEAR,
@@ -1080,7 +1106,6 @@ local function DrawMiniMap()
 end
 
 function widget:DrawScreen()
-	local cs = Spring.GetCameraState()
 	if (options.disableMinimap.value or window.hidden or cs.name == "ov") then
 		gl.ConfigMiniMap(0,0,0,0) --// a phantom map still clickable if this is not present.
 		lx = 0
@@ -1096,7 +1121,6 @@ function widget:DrawScreen()
 		cx,cy,cw,ch = AdjustMapAspectRatioToWindow(cx,cy,cw,ch)
 	end
 	
-	local vsx,vsy = Spring.GetViewSizes()
 	if (lw ~= cw or lh ~= ch or lx ~= cx or ly ~= cy or last_window_x ~= window.x or last_window_y ~= window.y) then
 		lx = cx
 		ly = cy
@@ -1104,6 +1128,7 @@ function widget:DrawScreen()
 		lw = cw
 		last_window_x = window.x
 		last_window_y = window.y
+		vsx,vsy = Spring.GetViewSizes()
 		
 		cx,cy = map_panel:LocalToScreen(cx,cy)
 		gl.ConfigMiniMap(cx*(WG.uiScale or 1),(vsy-ch-cy)*(WG.uiScale or 1),cw*(WG.uiScale or 1),ch*(WG.uiScale or 1))

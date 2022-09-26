@@ -16,16 +16,19 @@ local stateData = {
 	[CMD.MOVE_STATE] = 3,
 	[CMD_PUSH_PULL] = 2,
 	[CMD_MISC_PRIORITY] = 3,
-	[CMD_GOO_GATHER] = 2,
+	[CMD_GOO_GATHER] = 3,
 	[CMD.REPEAT] = 2,
 	[CMD_RETREAT] = 4,
 	[CMD.TRAJECTORY] = 2,
 	[CMD_DISABLE_ATTACK] = 2,
 	[CMD_UNIT_BOMBER_DIVE_STATE] = 4,
 	--[CMD_AUTO_CALL_TRANSPORT] = 2, -- Handled entirely in luaUI so not included here.
-	[CMD_GLOBAL_BUILD] = 2,
+	--[CMD_GLOBAL_BUILD] = 2, -- Handled entirely in luaUI so not included here.
 	[CMD_UNIT_KILL_SUBORDINATES] = 2,
 	[CMD_PREVENT_OVERKILL] = 2,
+	[CMD_PREVENT_BAIT] = 5,
+	[CMD_FIRE_AT_SHIELD] = 2,
+	[CMD_FIRE_TOWARDS_ENEMY] = 2,
 	--[CMD_SELECTION_RANK] = 2, -- Handled entirely in luaUI so not included here.
 	[CMD_UNIT_AI] = 2,
 }
@@ -46,6 +49,8 @@ local gadgetReverse = {
 	[CMD_UNIT_FLOAT_STATE] = true,
 	[CMD_MISC_PRIORITY] = true,
 	[CMD_UNIT_BOMBER_DIVE_STATE] = true,
+	[CMD_PREVENT_BAIT] = true,
+	[CMD_GOO_GATHER] = true,
 }
 
 return stateData, gadgetReverse, specialHandling

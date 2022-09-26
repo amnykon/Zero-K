@@ -88,7 +88,7 @@ local function SumOverlappingAreas(_, data, _, tx, ty, tz, allyTeamID, areaLimit
 			return true -- Remove
 		end
 		if data.posUpdateFrame and data.posUpdateFrame > gameFrame then
-			if data.targetID and Spring.ValidUnitID(data.targetID) then
+			if data.targetID and spValidUnitID(data.targetID) then
 				local _,_,_,_,_,_, x, y, z = Spring.GetUnitPosition(data.targetID, true, true)
 				data.x = x
 				data.y = y
@@ -121,7 +121,8 @@ function GG.OverkillPreventionPlaceholder_CheckBlock(unitID, targetID, allyTeamI
 	local _,_,_,_,_,_, x, y, z = Spring.GetUnitPosition(targetID, true, true)
 	
 	local targetVisiblityState = Spring.GetUnitLosState(targetID, allyTeamID, true)
-	local targetIdentified = (targetVisiblityState > 2)
+	local targetIdentified = (targetVisiblityState == 15) or (math.floor(targetVisiblityState / 4) % 4 == 3)
+	local shotsRequired
 	if targetIdentified then
 		local targetDefID = Spring.GetUnitDefID(targetID)
 		shotsRequired = shotRequirement[targetDefID] or 2

@@ -76,6 +76,13 @@ local DRAW_NAME_COMMANDS = {
 	[CMD.STOCKPILE] = true, -- draws stockpile progress (command handler sends correct string).
 }
 
+local DYNAMIC_COMMANDS = {
+	[CMD_ONECLICK_WEAPON] = true,
+	[CMD.MANUALFIRE] = true,
+}
+
+local REMOVE_TAG_FRAMES = 180 -- Game frames between reseting the tag removal table.
+
 -- Defined upon learning the appropriate colors
 local BUTTON_COLOR
 local BUTTON_FOCUS_COLOR
@@ -110,8 +117,6 @@ end
 -- Command Handling and lower variables
 
 local commandPanels, commandPanelMap, commandDisplayConfig, hiddenCommands, textConfig, buttonLayoutConfig, instantCommands, cmdPosDef = include("Configs/integral_menu_config.lua")
-
-local fontObjects = {} -- Filled in init
 
 local statePanel = {}
 local tabPanel
@@ -543,6 +548,7 @@ AddCommandCullOptions()
 
 local buttonsByCommand = {}
 local alreadyRemovedTag = {}
+local lastRemovedTagResetFrame = false
 
 --------------------------------------------------------------------------------
 --------------------------------------------------------------------------------
@@ -860,6 +866,11 @@ local function MoveOrRemoveCommands(cmdID, factoryUnitID, commands, queuePositio
 		return
 	end
 	
+	if (not lastRemovedTagResetFrame) or lastRemovedTagResetFrame + REMOVE_TAG_FRAMES < Spring.GetGameFrame() then
+		alreadyRemovedTag = {}
+		lastRemovedTagResetFrame = Spring.GetGameFrame()
+	end
+	
 	-- delete from back so that the order is not canceled while under construction
 	local i = queuePosition
 	local j = 0
@@ -999,6 +1010,12 @@ end
 local function ClickFunc(mouse, cmdID, isStructure, factoryUnitID, fakeFactory, isQueueButton, queueBlock)
 	local left, right = mouse == 1, mouse == 3
 	local alt, ctrl, meta, shift = spGetModKeyState()
+	
+	-- RMB beats Alt since Alt is opposed to the concept of removing orders.
+	if right then
+		alt = false
+	end
+	
 	if factoryUnitID and isQueueButton then
 		if meta and cmdID then
 			local bq = Spring.GetUnitCmdDescs(factoryUnitID)
@@ -1086,6 +1103,7 @@ local function GetButton(parent, name, selectionIndex, x, y, xStr, yStr, width, 
 		height = height,
 		caption = buttonLayout.caption or false,
 		noFont = not buttonLayout.caption,
+		objectOverrideFont = WG.GetFont(14),
 		padding = {0, 0, 0, 0},
 		parent = parent,
 		preserveChildrenOrder = true,
@@ -1183,7 +1201,7 @@ local function GetButton(parent, name, selectionIndex, x, y, xStr, yStr, width, 
 				height = config.height,
 				align = config.align,
 				fontsize = config.fontsize,
-				objectOverrideFont = fontObjects[config.fontsize],
+				objectOverrideFont = WG.GetFont(config.fontsize),
 				caption = text,
 				parent = button,
 			}
@@ -1418,6 +1436,13 @@ local function GetButton(parent, name, selectionIndex, x, y, xStr, yStr, width, 
 					end
 					SetImage(texture)
 				end
+			elseif newCmdID and DYNAMIC_COMMANDS[newCmdID] then
+				-- Reset potentially stale special weapon iamge and tooltip.
+				-- Action is the same so hotkey does not require a reset.
+				local displayConfig = GetDisplayConfig(cmdID)
+				button.tooltip = GetButtonTooltip(displayConfig, command, state)
+				local texture = (displayConfig and displayConfig.texture) or command.texture
+				SetImage(texture)
 			end
 			if not notGlobal then
 				buttonsByCommand[cmdID] = externalFunctionsAndData
@@ -1719,9 +1744,6 @@ local function GetQueuePanel(parent, columns)
 	
 	function externalFunctions.UpdateFactory(newFactoryUnitID, newFactoryUnitDefID, selectionIndex)
 		local buttonCount = 0
-		
-		alreadyRemovedTag = {}
-		
 		factoryUnitID = newFactoryUnitID
 		factoryUnitDefID = newFactoryUnitDefID
 	
@@ -1780,6 +1802,7 @@ local function GetTabButton(panel, contentControl, name, humanName, hotkey, loit
 		caption = humanName,
 		padding = {0, 0, 0, 1},
 		tooltip = NO_TOOLTIP,
+		objectOverrideFont = WG.GetFont(14),
 		OnClick = {
 			function()
 				DoClick(true)
@@ -1789,8 +1812,7 @@ local function GetTabButton(panel, contentControl, name, humanName, hotkey, loit
 	button.backgroundColor[4] = 0.4
 	
 	if disabled then
-		button.font.outlineColor = {0, 0, 0, 1}
-		button.font.color = {0.6, 0.6, 0.6, 1}
+		button.font = WG.GetSpecialFont(14, "integral_grey", {outlineColor = {0, 0, 0, 1}, color = {0.6, 0.6, 0.6, 1}})
 		button.supressButtonReaction = true
 	end
 	
@@ -2150,24 +2172,6 @@ end
 --------------------------------------------------------------------------------
 -- Initialization
 
-local function InitializeFonts()
-	local sizes = {12, 14, 16}
-
-	for i = 1, #sizes do
-		fontObjects[sizes[i]] = Chili.Font:New {
-			font          = "FreeSansBold.otf",
-			size          = sizes[i],
-			shadow        = true,
-			outline       = false,
-			outlineWidth  = 3,
-			outlineWeight = 3,
-			color         = {1, 1, 1, 1},
-			outlineColor  = {0, 0, 0, 1},
-			autoOutlineColor = true,
-		}
-	end
-end
-
 local gridKeyMap, gridMap, gridCustomOverrides -- Configuration requires this
 
 local function InitializeControls()
@@ -2192,6 +2196,7 @@ local function InitializeControls()
 		resizable = false,
 		tweakDraggable = true,
 		tweakResizable = true,
+		noFont = true,
 		padding = {0, 0, 0, 0},
 		color = {0, 0, 0, 0},
 		parent = screen0,
@@ -2225,6 +2230,7 @@ local function InitializeControls()
 		bottom = 0,
 		draggable = false,
 		resizable = false,
+		noFont = true,
 		padding = {0, 0, 0, 0},
 		backgroundColor = {1, 1, 1, options.background_opacity.value},
 		noClickThrough = true,
@@ -2576,7 +2582,6 @@ function widget:Initialize()
 	Control = Chili.Control
 	screen0 = Chili.Screen0
 	
-	InitializeFonts()
 	InitializeControls()
 	
 	WG.IntegralMenu = externalFunctions

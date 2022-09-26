@@ -1,7 +1,7 @@
 return { shipskirm = {
   unitname               = [[shipskirm]],
   name                   = [[Mistral]],
-  description            = [[Rocket Boat (Skirmisher)]],
+  description            = [[Skirmisher Ship]],
   acceleration           = 0.234,
   activateWhenBuilt      = true,
   brakeRate              = 1.38,
@@ -18,6 +18,7 @@ return { shipskirm = {
   corpse                 = [[DEAD]],
 
   customParams           = {
+    bait_level_default = 1,
     turnatfullspeed = [[1]],
     modelradius     = [[24]],
   },
@@ -28,12 +29,9 @@ return { shipskirm = {
   footprintX             = 3,
   footprintZ             = 3,
   iconType               = [[shipskirm]],
-  idleAutoHeal           = 5,
-  idleTime               = 1800,
   losEmitHeight          = 30,
   maxDamage              = 650,
   maxVelocity            = 2.1,
-  minCloakDistance       = 350,
   minWaterDepth          = 10,
   movementClass          = [[BOAT3]],
   noAutoFire             = false,
@@ -80,13 +78,13 @@ return { shipskirm = {
       craterMult              = 2,
 
       customParams        = {
+        force_ignore_ground = [[1]],
         light_camera_height = 1800,
       },
       
       damage                  = {
         default = 200,
         planes  = 200,
-        subs    = 10,
       },
 
       fireStarter             = 70,

@@ -1,7 +1,7 @@
 return { striderantiheavy = {
   unitname               = [[striderantiheavy]],
   name                   = [[Ultimatum]],
-  description            = [[Cloaked Anti-Heavy/Anti-Strider Walker]],
+  description            = [[Cloaked Anti-Strider Walker (Undersea Fire)]],
   acceleration           = 0.54,
   activateWhenBuilt      = true,
   autoHeal               = 5,
@@ -20,6 +20,7 @@ return { striderantiheavy = {
   corpse                 = [[DEAD]],
 
   customParams           = {
+    bait_level_default = 0,
     modelradius    = [[21]],
   },
 
@@ -28,8 +29,6 @@ return { striderantiheavy = {
   footprintX             = 2,
   footprintZ             = 2,
   iconType               = [[corcommander]],
-  idleAutoHeal           = 5,
-  idleTime               = 1800,
   initCloaked            = true,
   leaveTracks            = true,
   maxDamage              = 2000,
@@ -39,7 +38,7 @@ return { striderantiheavy = {
   minCloakDistance       = 120,
   movementClass          = [[AKBOT2]],
   noChaseCategory        = [[TERRAFORM SATELLITE FIXEDWING GUNSHIP HOVER SHIP SWIM SUB LAND FLOAT SINK TURRET]],
-  objectName             = [[noruas]],
+  objectName             = [[noruas.s3o]],
   script                 = [[striderantiheavy.lua]],
   selfDestructAs         = [[ESTOR_BUILDING]],
 

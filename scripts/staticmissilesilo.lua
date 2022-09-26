@@ -28,13 +28,6 @@ local pads = {silo1, silo2, silo3, silo4}
 -- variables
 --------------------------------------------------------------------------------
 local padnum = 1
-local missiles = {}
-
---------------------------------------------------------------------------------
--- signals
---------------------------------------------------------------------------------
-local SIG_AIM = 2
-
 
 --------------------------------------------------------------------------------
 -- main code
@@ -51,6 +44,7 @@ end
 
 function script.Create()
 	StartThread(GG.Script.SmokeUnit, unitID, smokePiece)
+	Spring.SetUnitNanoPieces(unitID, {trolleyb})
 end
 
 function script.StartBuilding()
@@ -66,10 +60,6 @@ end
 
 function script.Deactivate()
 	SetUnitValue(COB.INBUILDSTANCE, 0)
-end
-
-function script.QueryNanoPiece()
-	return trolleyb
 end
 
 function script.QueryBuildInfo()

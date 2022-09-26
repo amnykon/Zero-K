@@ -102,7 +102,6 @@ end
 --------------------------------------------------------------------------------
 local armsFree = true
 local restoreHeading = 0
-local gun_num = 0
 
 local starBLaunchers = {}
 local wepTable = UnitDefs[unitDefID].weapons
@@ -124,7 +123,7 @@ local function Walk()
 	Signal(SIG_WALK)
 	SetSignalMask(SIG_WALK)
 	while true do
-		local speedMult = (Spring.GetUnitRulesParam(unitID, "totalMoveSpeedChange") or 1)*dyncomm.GetPace()
+		local speedMult = math.max(0.05, GG.att_MoveChange[unitID] or 1)*dyncomm.GetPace()
 		
 		--left leg up, right leg back
 		Turn(thighL, x_axis, THIGH_FRONT_ANGLE, THIGH_FRONT_SPEED * speedMult)
@@ -200,9 +199,6 @@ function jumping()
 	for i=1,4 do
 		EmitSfx(jets[i], 1028)
 	end
-end
-
-function halfJump()
 end
 
 function endJump()
@@ -312,11 +308,6 @@ function script.StartBuilding(heading, pitch)
 	restoreHeading = heading
 	Turn(torso, y_axis, heading, ARM_SPEED_PITCH)
 	SetUnitValue(COB.INBUILDSTANCE, 1)
-end
-
-function script.QueryNanoPiece()
-	GG.LUPS.QueryNanoPiece(unitID,unitDefID,Spring.GetUnitTeam(unitID),snout)
-	return snout
 end
 
 function script.Killed(recentDamage, maxHealth)

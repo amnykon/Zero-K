@@ -33,6 +33,8 @@ local handledUnitDefIDs = {
 	[UnitDefNames["subraider"].id] = 1,
 	[UnitDefNames["turretheavylaser"].id] = 1,
 	[UnitDefNames["amphassault"].id] = 1,
+	[UnitDefNames["hoverarty"].id] = 1,
+	[UnitDefNames["turretantiheavy"].id] = 1,
 
 	-- Static only OKP below
 	[UnitDefNames["amphfloater"].id] = 1,
@@ -48,11 +50,10 @@ local handledUnitDefIDs = {
 	[UnitDefNames["shipassault"].id] = 1,
 	[UnitDefNames["shiparty"].id] = 1,
 	[UnitDefNames["spiderskirm"].id] = 1,
-
-	-- Needs LUS
-	--[UnitDefNames["tankassault"].id] = 1,
-	--[UnitDefNames["vehassault"].id] = 1,
-	--[UnitDefNames["tankheavyassault"].id] = 1,
+	[UnitDefNames["tankassault"].id] = 1,
+	[UnitDefNames["vehassault"].id] = 1,
+	[UnitDefNames["tankheavyassault"].id] = 1,
+	[UnitDefNames["spidercrabe"].id] = 1,
 }
 
 local blackHoleUnitDefs = {

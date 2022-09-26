@@ -1,7 +1,7 @@
 return { striderdetriment = {
   unitname               = [[striderdetriment]],
   name                   = [[Detriment]],
-  description            = [[Ultimate Assault Strider]],
+  description            = [[Ultimate Assault Strider (Undersea Fire)]],
   acceleration           = 0.328,
   activateWhenBuilt      = true,
   autoheal               = 100,
@@ -25,13 +25,18 @@ return { striderdetriment = {
     jump_height           = 500,
     jump_speed            = 8,
     jump_delay            = 90,
-	jump_delay_turn_scale = 80/2^15,
+    jump_delay_turn_scale = 80/2^15,
     jump_reload           = 100,
     jump_from_midair      = 0,
     jump_rotate_midair    = 0,
     modelradius           = [[95]],
     draw_reload_num       = 3,
     selection_scale       = 1.12,
+    decloak_footprint     = 6,
+
+    outline_x = 230,
+    outline_y = 230,
+    outline_yoff = 70,
   },
 
   explodeAs              = [[NUCLEAR_MISSILE]],
@@ -44,7 +49,6 @@ return { striderdetriment = {
   maxSlope               = 37,
   maxVelocity            = 1.2,
   maxWaterDepth          = 5000,
-  minCloakDistance       = 150,
   movementClass          = [[AKBOT4]],
   noAutoFire             = false,
   noChaseCategory        = [[TERRAFORM SATELLITE SUB FIXEDWING GUNSHIP]],
@@ -195,7 +199,6 @@ return { striderdetriment = {
       damage                  = {
         default = 2.05,
         planes  = 20.5,
-        subs    = 1.125,
       },
       
       explosionGenerator      = [[custom:flash_teal7]],
@@ -234,7 +237,6 @@ return { striderdetriment = {
       damage                  = {
         default = 800.1,
         planes  = 800.1,
-        subs    = 50.1,
       },
 
       explosionGenerator      = [[custom:flash1green]],
@@ -305,7 +307,7 @@ return { striderdetriment = {
       impulseFactor           = 0,
       interceptedByShieldType = 1,
       lodDistance             = 10000,
-      range                   = 820,
+      range                   = 800,
       reloadtime              = 40,
       rgbColor                = [[0.1 1 0]],
       rgbColor2               = [[0.5 0.1 0.2]],
@@ -362,11 +364,11 @@ return { striderdetriment = {
       craterMult              = 15,
 
       damage                  = {
-        default = 200.1,        
+        default = 200.1,
       },
 
       edgeEffectiveness       = 0,
-      explosionGenerator      = [[custom:dirtyfootstep]],      
+      explosionGenerator      = [[custom:dirtyfootstep]],
       interceptedByShieldType = 1,
       noSelfDamage            = true,
       range                   = 5,
@@ -412,7 +414,7 @@ return { striderdetriment = {
       customParams            = {
         hidden = true
       }
-    },    
+    },
   },
 
 

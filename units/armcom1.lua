@@ -43,8 +43,6 @@ return { armcom1 = {
   footprintX             = 2,
   footprintZ             = 2,
   iconType               = [[commander1]],
-  idleAutoHeal           = 5,
-  idleTime               = 1800,
   leaveTracks            = true,
   losEmitHeight          = 40,
   maxDamage              = 2500,
@@ -53,10 +51,9 @@ return { armcom1 = {
   maxWaterDepth          = 5000,
   metalMake              = 4,
   metalStorage           = 500,
-  minCloakDistance       = 75,
   movementClass          = [[AKBOT2]],
   noChaseCategory        = [[TERRAFORM SATELLITE FIXEDWING GUNSHIP HOVER SHIP SWIM SUB LAND FLOAT SINK TURRET]],
-  objectName             = [[ARMCOM]],
+  objectName             = [[armcom.s3o]],
   script                 = [[armcom.lua]],
   selfDestructAs         = [[ESTOR_BUILDINGEX]],
 
@@ -116,7 +113,6 @@ return { armcom1 = {
 
       damage                  = {
         default = 0,
-        subs    = 0,
       },
 
       duration                = 0.1,
@@ -158,7 +154,6 @@ return { armcom1 = {
 
       damage                  = {
         default = 15.06,
-        subs    = 0.8,
       },
 
       duration                = 0.1,

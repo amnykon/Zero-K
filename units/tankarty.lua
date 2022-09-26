@@ -17,20 +17,19 @@ return { tankarty = {
   corpse              = [[DEAD]],
 
   customParams        = {
+    bait_level_default = 1,
+    unstick_leeway    = 30, -- Don't lose move orders if stuck while packing.
   },
 
   explodeAs           = [[BIG_UNITEX]],
   footprintX          = 3,
   footprintZ          = 3,
   iconType            = [[tankarty]],
-  idleAutoHeal        = 5,
-  idleTime            = 1800,
   leaveTracks         = true,
   maxDamage           = 840,
   maxSlope            = 18,
   maxVelocity         = 2,
   maxWaterDepth       = 22,
-  minCloakDistance    = 75,
   movementClass       = [[TANK3]],
   moveState           = 0,
   noAutoFire          = false,
@@ -82,7 +81,6 @@ return { tankarty = {
       damage                  = {
         default = 600.5,
         planes  = 600.5,
-        subs    = 35,
       },
 
       edgeEffectiveness       = 0.5,
@@ -90,7 +88,7 @@ return { tankarty = {
       impulseBoost            = 0,
       impulseFactor           = 0.4,
       interceptedByShieldType = 1,
-      myGravity               = 0.095,
+      myGravity               = 0.090,
       noSelfDamage            = true,
       range                   = 1120,
       reloadtime              = 7,
@@ -98,7 +96,7 @@ return { tankarty = {
       soundStart              = [[weapon/cannon/pillager_fire]],
       turret                  = true,
       weaponType              = [[Cannon]],
-      weaponVelocity          = 315,
+      weaponVelocity          = 320,
     },
 
   },

@@ -20,6 +20,7 @@ return { vehcapture = {
   corpse              = [[DEAD]],
 
   customParams        = {
+    bait_level_default = 1,
     modelradius    = [[13]],
     turnatfullspeed = [[1]],
     cus_noflashlight = 1,
@@ -29,17 +30,14 @@ return { vehcapture = {
   footprintX          = 3,
   footprintZ          = 3,
   iconType            = [[vehiclespecial]],
-  idleAutoHeal        = 5,
-  idleTime            = 1800,
   leaveTracks         = true,
   maxDamage           = 820,
   maxSlope            = 18,
   maxVelocity         = 1.95,
   maxWaterDepth       = 22,
-  minCloakDistance    = 75,
   movementClass       = [[TANK3]],
   noAutoFire          = false,
-  noChaseCategory     = [[TERRAFORM SATELLITE FIXEDWING GUNSHIP]],
+  noChaseCategory     = [[TERRAFORM SATELLITE FIXEDWING GUNSHIP DRONE]],
   objectName          = [[corvrad_big.s3o]],
   script              = [[vehcapture.lua]],
   selfDestructAs      = [[BIG_UNITEX]],
@@ -89,7 +87,6 @@ return { vehcapture = {
 
       damage                  = {
         default = 22,
-        subs    = 0.5,
       },
 
       explosionGenerator      = [[custom:NONE]],

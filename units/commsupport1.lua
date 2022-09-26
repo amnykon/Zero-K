@@ -42,8 +42,6 @@ return { commsupport1 = {
   footprintX          = 2,
   footprintZ          = 2,
   iconType            = [[commander1]],
-  idleAutoHeal        = 5,
-  idleTime            = 1800,
   leaveTracks         = true,
   losEmitHeight       = 40,
   maxDamage           = 2000,
@@ -52,7 +50,6 @@ return { commsupport1 = {
   maxWaterDepth       = 5000,
   metalMake           = 4,
   metalStorage        = 500,
-  minCloakDistance    = 75,
   movementClass       = [[AKBOT2]],
   noChaseCategory     = [[TERRAFORM FIXEDWING GUNSHIP HOVER SHIP SWIM SUB LAND FLOAT SINK TURRET]],
   objectName          = [[commsupport.s3o]],
@@ -153,7 +150,6 @@ return { commsupport1 = {
       damage                  = {
         default = 140,
         planes  = 140,
-        subs    = 8,
       },
       
       customParams = {

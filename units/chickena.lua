@@ -16,6 +16,9 @@ return { chickena = {
   category            = [[LAND SINK]],
 
   customParams        = {
+    outline_x = 235,
+    outline_y = 235,
+    outline_yoff = 25,
   },
 
   explodeAs           = [[NOWEAPON]],
@@ -29,7 +32,6 @@ return { chickena = {
   maxSlope            = 37,
   maxVelocity         = 1.8,
   maxWaterDepth       = 5000,
-  minCloakDistance    = 75,
   movementClass       = [[AKBOT4]],
   noAutoFire          = false,
   noChaseCategory     = [[SHIP SWIM FLOAT TERRAFORM FIXEDWING SATELLITE GUNSHIP MINE]],

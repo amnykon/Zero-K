@@ -13,9 +13,12 @@ return { chicken = {
   canGuard            = true,
   canMove             = true,
   canPatrol           = true,
-  category            = [[LAND SINK]],
+  category            = [[LAND SINK SMALL]],
 
   customParams        = {
+    outline_x = 70,
+    outline_y = 70,
+    outline_yoff = 15,
   },
 
   explodeAs           = [[NOWEAPON]],
@@ -28,7 +31,6 @@ return { chicken = {
   maxDamage           = 270,
   maxSlope            = 36,
   maxVelocity         = 2.9,
-  minCloakDistance    = 75,
   movementClass       = [[AKBOT2]],
   noAutoFire          = false,
   noChaseCategory     = [[SHIP FLOAT SWIM TERRAFORM FIXEDWING SATELLITE GUNSHIP]],
@@ -83,7 +85,6 @@ return { chicken = {
       damage                  = {
         default = 80,
         planes  = 80,
-        subs    = 80,
       },
 
       explosionGenerator      = [[custom:NONE]],

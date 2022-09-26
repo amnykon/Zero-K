@@ -22,20 +22,23 @@ return { amphimpulse = {
     sink_on_emp       = 1,
     floattoggle       = [[1]],
     selection_scale   = 0.8,
-    aim_lookahead     = 180,
+    aim_lookahead     = 120,
+    set_target_range_buffer = 50,
+    set_target_speed_buffer = 10,
+
+    outline_x = 80,
+    outline_y = 80,
+    outline_yoff = 12.5,
   },
 
   explodeAs              = [[BIG_UNITEX]],
   footprintX             = 3,
   footprintZ             = 3,
   iconType               = [[amphraider]],
-  idleAutoHeal           = 5,
-  idleTime               = 1800,
   leaveTracks            = true,
   maxDamage              = 760,
   maxSlope               = 36,
   maxVelocity            = 2.35,
-  minCloakDistance       = 75,
   movementClass          = [[AKBOT3]],
   noChaseCategory        = [[TERRAFORM FIXEDWING GUNSHIP]],
   objectName             = [[amphraider2.s3o]],
@@ -79,6 +82,7 @@ return { amphimpulse = {
       craterMult              = 0,
 
       customParams            = {
+        force_ignore_ground = [[1]],
         lups_explodelife = 1.0,
         lups_explodespeed = 0.4,
         light_radius = 120

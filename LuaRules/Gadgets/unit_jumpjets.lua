@@ -40,26 +40,18 @@ local spGetUnitPosition      = Spring.GetUnitPosition
 local spInsertUnitCmdDesc    = Spring.InsertUnitCmdDesc
 local spSetUnitRulesParam    = Spring.SetUnitRulesParam
 local spGetUnitRulesParam    = Spring.GetUnitRulesParam
-local spSetUnitNoMinimap     = Spring.SetUnitNoMinimap
 local spGetUnitIsStunned     = Spring.GetUnitIsStunned
-local spGetCommandQueue      = Spring.GetCommandQueue
 local spGiveOrderToUnit      = Spring.GiveOrderToUnit
 local spSetUnitVelocity      = Spring.SetUnitVelocity
-local spSetUnitNoSelect      = Spring.SetUnitNoSelect
-local spSetUnitBlocking      = Spring.SetUnitBlocking
 local spSetUnitMoveGoal      = Spring.SetUnitMoveGoal
 local spGetGroundHeight      = Spring.GetGroundHeight
 local spGetGroundNormal      = Spring.GetGroundNormal
 local spTestMoveOrder        = Spring.TestMoveOrder
-local spTestBuildOrder       = Spring.TestBuildOrder
 local spGetGameSeconds       = Spring.GetGameSeconds
 local spGetUnitHeading       = Spring.GetUnitHeading
-local spSetUnitNoDraw        = Spring.SetUnitNoDraw
 local spGetGameFrame         = Spring.GetGameFrame
 local spGetUnitDefID         = Spring.GetUnitDefID
 local spGetUnitTeam          = Spring.GetUnitTeam
-local spDestroyUnit          = Spring.DestroyUnit
-local spCreateUnit           = Spring.CreateUnit
 
 local mcSetRotationVelocity  = MoveCtrl.SetRotationVelocity
 local mcSetPosition          = MoveCtrl.SetPosition
@@ -97,6 +89,13 @@ for udid = 1, #UnitDefs do
 	local ud = UnitDefs[udid]
 	if ud.isImmobile and not ud.customParams.mobilebuilding then
 		blockingStructure[udid] = true
+	end
+end
+
+local spUnitScript = Spring.UnitScript -- CallAsUnit can't be localized directly because a later-layered gadget modifies it
+local function CallAsUnitIfExists(unitID, func, ...)
+	if func then
+		spUnitScript.CallAsUnit(unitID, func, ...)
 	end
 end
 
@@ -231,7 +230,6 @@ local function Jump(unitID, goal, origCmdParams, mustJump)
 	end
 	
 	local rotateMidAir = jumpDef.rotateMidAir
-	local env
 	
 	local vector = {goal[1] - start[1],
 	                goal[2] - start[2],
@@ -290,10 +288,10 @@ local function Jump(unitID, goal, origCmdParams, mustJump)
 	Spring.SetUnitRulesParam(unitID, "jump_goal_z", goal[3], privateTable)
 	
 
-	env = Spring.UnitScript.GetScriptEnv(unitID)
+	local env = Spring.UnitScript.GetScriptEnv(unitID) or emptyTable
 	
 	if (delay == 0) then
-		Spring.UnitScript.CallAsUnit(unitID,env.beginJump,turn,lineDist,flightDist,duration)
+		CallAsUnitIfExists(unitID,env.beginJump,turn,lineDist,flightDist,duration)
 		if rotateMidAir then
 			mcSetRotation(unitID, 0, (2^15 - startHeading)/rotUnit, 0) -- keep current heading
 			mcSetRotationVelocity(unitID, 0, -turn/rotUnit*step, 0)
@@ -302,7 +300,7 @@ local function Jump(unitID, goal, origCmdParams, mustJump)
 			GG.PlayFogHiddenSound("Jump", UnitDefs[unitDefID].mass/10, start[1], start[2], start[3])
 		end
 	else
-		Spring.UnitScript.CallAsUnit(unitID,env.preJump,turn,lineDist,flightDist,duration)
+		CallAsUnitIfExists(unitID,env.preJump,turn,lineDist,flightDist,duration)
 	end
 	spSetUnitRulesParam(unitID,"jumpReload",0)
 
@@ -315,7 +313,7 @@ local function Jump(unitID, goal, origCmdParams, mustJump)
 			if (not Spring.ValidUnitID(unitID) or Spring.GetUnitIsDead(unitID)) then
 				return
 			end
-			Spring.UnitScript.CallAsUnit(unitID,env.beginJump)
+			CallAsUnitIfExists(unitID,env.beginJump)
 			if PLAY_SOUND and (not cannotJumpMidair) then	-- don't make sound if we jump with legs instead of jets
 				GG.PlayFogHiddenSound("Jump", UnitDefs[unitDefID].mass/10, start[1], start[2], start[3])
 			end
@@ -330,9 +328,7 @@ local function Jump(unitID, goal, origCmdParams, mustJump)
 		local attachedTransport = Spring.GetUnitTransporter(unitID)
 		if (attachedTransport) then
 			local envTrans = Spring.UnitScript.GetScriptEnv(attachedTransport)
-			if (envTrans.ForceDropUnit) then
-				Spring.UnitScript.CallAsUnit(attachedTransport,envTrans.ForceDropUnit)
-			end
+			CallAsUnitIfExists(attachedTransport, envTrans.ForceDropUnit)
 		end
 	
 		local hitStructure, structureCollisionData
@@ -355,10 +351,10 @@ local function Jump(unitID, goal, origCmdParams, mustJump)
 			Spring.MoveCtrl.SetVelocity(unitID, (x - lastX), (y - lastY), (z - lastZ))
 			lastX, lastY, lastZ = x, y, z
 
-			Spring.UnitScript.CallAsUnit(unitID, env.jumping, i * 100)
+			CallAsUnitIfExists(unitID, env.jumping, i * 100)
 		
 			if (not halfJump and i > 0.5) then
-				Spring.UnitScript.CallAsUnit(unitID,env.halfJump)
+				CallAsUnitIfExists(unitID,env.halfJump)
 				halfJump = true
 				
 				-- Do structure collision here to prevent early collision (perhaps a rejump onto the same structure?)
@@ -380,7 +376,7 @@ local function Jump(unitID, goal, origCmdParams, mustJump)
 			i = i + step
 		end
 
-		Spring.UnitScript.CallAsUnit(unitID,env.endJump)
+		CallAsUnitIfExists(unitID,env.endJump)
 		if PLAY_SOUND then
 			GG.PlayFogHiddenSound("JumpLand", UnitDefs[unitDefID].mass/10, goal[1], goal[2], goal[3])
 		end
@@ -554,6 +550,12 @@ function gadget:CommandFallback(unitID, unitDefID, teamID, cmdID, cmdParams, cmd
 	end
 
 	if ((Spring.GetUnitRulesParam(unitID, "orbitalDrop") or 0) == 1) then
+		return true, false
+	end
+
+	if Spring.GetUnitIsStunned(unitID) then
+		-- these normally don't receive CommandFallback,
+		-- but can be reached via CMD.INSERT (engine bug?)
 		return true, false
 	end
 

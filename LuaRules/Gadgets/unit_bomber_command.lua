@@ -49,23 +49,7 @@ local CMD_OPT_SHIFT    = CMD.OPT_SHIFT
 
 include "LuaRules/Configs/customcmds.h.lua"
 
-local airpadDefs = {
-	[UnitDefNames["factoryplane"].id] = {
-		mobile = false,
-		cap = 1,
-		padPieceName={"land"}
-	},
-	[UnitDefNames["staticrearm"].id] = {
-		mobile = false,
-		cap = 4,
-		padPieceName={"land1","land2","land3","land4"}
-	},
-	[UnitDefNames["shipcarrier"].id] = {
-		mobile = true,
-		cap = 2,
-		padPieceName={"LandingFore","LandingAft"}
-	},
-}
+local airpadDefs = VFS.Include("LuaRules/Configs/airpad_defs.lua", nil, VFS.GAME)
 
 -- land if pad is within this range
 local fixedwingPadRadius = 600
@@ -249,7 +233,7 @@ local function RefreshEmptyPad(airpadID,airpadDefID)
 	local ux,uy,uz = spGetUnitPosition(airpadID)
 	local front, top, right = spGetUnitVectors(airpadID)
 	airpadsData[airpadID].emptySpot = {}
-	for i=1, airpadDefs[airpadDefID].cap do
+	for i=1, #padPieceName do
 		local padName = padPieceName[i]
 		local pieceNum = piecesList[padName]
 		local x,y,z = spGetUnitPiecePosition(airpadID, pieceNum)
@@ -328,7 +312,7 @@ local function FindNearestAirpad(unitID, team)
 			end
 			airpadsPerAllyteam[allyTeam][airpadID] = nil
 		else
-		-- Need to ensure that excludedairpad[teamid][padID] is not nil before running! 
+		-- Need to ensure that excludedairpad[teamid][padID] is not nil before running!
 			if (airpadsData[airpadID].reservations.count < airpadsData[airpadID].cap) and not excludedPads[teamID][airpadID] then
 				freePads[airpadID] = true
 				freePadCount = freePadCount + 1
@@ -807,8 +791,6 @@ else
 -- UNSYNCED
 --------------------------------------------------------------------------------
 local spGetLocalTeamID = Spring.GetLocalTeamID
-local spGetSpectatingState = Spring.GetSpectatingState
-local spValidUnitID = Spring.ValidUnitID
 local spGetSelectedUnits = Spring.GetSelectedUnits
 
 function gadget:DefaultCommand(type, targetID)
@@ -837,6 +819,8 @@ function gadget:DefaultCommand(type, targetID)
 end
 
 --[[ widget
+local spValidUnitID = Spring.ValidUnitID
+local spGetSpectatingState = Spring.GetSpectatingState
 local noAmmoTexture = 'LuaUI/Images/noammo.png'
 local function DrawUnitFunc(yshift)
 	gl.Translate(0,yshift,0)

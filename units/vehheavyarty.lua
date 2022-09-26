@@ -15,7 +15,7 @@ return { vehheavyarty = {
   corpse              = [[DEAD]],
 
   customParams        = {
-
+    bait_level_default = 2,
     dontfireatradarcommand = '0',
   },
 
@@ -23,13 +23,10 @@ return { vehheavyarty = {
   footprintX          = 3,
   footprintZ          = 3,
   iconType            = [[vehiclelrarty]],
-  idleAutoHeal        = 5,
-  idleTime            = 1800,
   leaveTracks         = true,
   maxDamage           = 1100,
   maxSlope            = 18,
   maxVelocity         = 2.0,
-  minCloakDistance    = 75,
   movementClass       = [[TANK3]],
   noChaseCategory     = [[TERRAFORM FIXEDWING GUNSHIP]],
   objectName          = [[core_diplomat.s3o]],
@@ -82,7 +79,6 @@ return { vehheavyarty = {
 
       damage         = {
         default = 800.1,
-        subs    = 4,
       },
 
       texture1=[[null]], --flare, reference: http://springrts.com/wiki/Weapon_Variables#Texture_Tags
@@ -106,9 +102,9 @@ return { vehheavyarty = {
       soundHit                = [[weapon/missile/vlaunch_hit]],
       soundStart              = [[weapon/missile/missile_launch]],
       tolerance               = 4000,
-      turnrate                = 18000,
-      weaponAcceleration      = 315,
-      weaponTimer             = 2,
+      turnrate                = 16000,
+      weaponAcceleration      = 280,
+      weaponTimer             = 2.1,
       weaponType              = [[StarburstLauncher]],
       weaponVelocity          = 8000,
     },

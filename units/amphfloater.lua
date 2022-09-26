@@ -17,24 +17,27 @@ return { amphfloater = {
   corpse                 = [[DEAD]],
 
   customParams           = {
-    amph_regen        = 60,
-    amph_submerged_at = 30,
-    sink_on_emp       = 0,
-    floattoggle       = [[1]],
-    selection_scale   = 0.85,
+    bait_level_default = 0,
+    aim_lookahead      = 60,
+    amph_regen         = 60,
+    amph_submerged_at  = 30,
+    sink_on_emp        = 0,
+    floattoggle        = [[1]],
+    selection_scale    = 0.85,
+
+    outline_x = 80,
+    outline_y = 80,
+    outline_yoff = 12.5,
   },
 
   explodeAs              = [[BIG_UNITEX]],
   footprintX             = 3,
   footprintZ             = 3,
   iconType               = [[amphskirm]],
-  idleAutoHeal           = 5,
-  idleTime               = 1800,
   leaveTracks            = true,
   maxDamage              = 1250,
   maxSlope               = 36,
   maxVelocity            = 1.7,
-  minCloakDistance       = 75,
   movementClass          = [[AKBOT3]],
   noChaseCategory        = [[TERRAFORM FIXEDWING GUNSHIP]],
   objectName             = [[can.s3o]],
@@ -44,6 +47,7 @@ return { amphfloater = {
   sfxtypes               = {
     explosiongenerators = {
         [[custom:bubbles_small]],
+        [[custom:disruptor_cannon_muzzle]],
     },
   },
 
@@ -76,7 +80,7 @@ return { amphfloater = {
       name                    = [[Disruption Cannon]],
       accuracy                = 200,
       areaOfEffect            = 32,
-      cegTag                  = [[beamweapon_muzzle_purple]],
+      cegTag                  = [[disruptortrail]],
       craterBoost             = 1,
       craterMult              = 2,
 
@@ -84,7 +88,7 @@ return { amphfloater = {
         burst = Shared.BURST_RELIABLE,
 
         timeslow_damagefactor = 1.667,
-        
+
         light_camera_height = 2500,
         light_color = [[1.36 0.68 1.5]],
         light_radius = 180,
@@ -92,7 +96,6 @@ return { amphfloater = {
 
       damage                  = {
         default = 150.1,
-        subs    = 7.5,
       },
 
       explosionGenerator      = [[custom:flashslowwithsparks]],
@@ -128,10 +131,9 @@ return { amphfloater = {
         timeslow_damagefactor = 1.7,
         bogus = 1,
       },
-  
+
       damage                  = {
         default = 150,
-        subs    = 7.5,
       },
 
       explosionGenerator      = [[custom:flashslowwithsparks]],

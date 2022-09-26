@@ -21,8 +21,13 @@ return { shipaa = {
   corpse                 = [[DEAD]],
 
   customParams           = {
+    bait_level_default = 0,
     modelradius    = [[45]],
     turnatfullspeed = [[1]],
+
+    outline_x = 160,
+    outline_y = 160,
+    outline_yoff = 25,
   },
 
   explodeAs              = [[BIG_UNITEX]],
@@ -30,12 +35,9 @@ return { shipaa = {
   footprintX             = 4,
   footprintZ             = 4,
   iconType               = [[shipaa]],
-  idleAutoHeal           = 5,
-  idleTime               = 1800,
   losEmitHeight          = 40,
   maxDamage              = 1900,
   maxVelocity            = 2.84,
-  minCloakDistance       = 75,
   minWaterDepth          = 5,
   movementClass          = [[BOAT4]],
   moveState              = 0,
@@ -91,7 +93,6 @@ return { shipaa = {
       damage                  = {
         default = 1.3,
         planes  = 12.7,
-        subs    = 1.5,
       },
 
       duration                = 0.02,
@@ -103,7 +104,7 @@ return { shipaa = {
       interceptedByShieldType = 1,
       lodDistance             = 10000,
       proximityPriority       = 4,
-      range                   = 1040,
+      range                   = 1000,
       reloadtime              = 0.1,
       rgbColor                = [[1 0 0]],
       soundHit                = [[weapon/laser/lasercannon_hit]],

@@ -27,6 +27,10 @@ return { shipcon = {
     modelradius    = [[40]],
     turnatfullspeed = [[1]],
     selection_scale = 1.2,
+
+    outline_x = 128,
+    outline_y = 128,
+    outline_yoff = 16,
   },
 
   energyUse              = 0,
@@ -35,11 +39,8 @@ return { shipcon = {
   footprintX             = 3,
   footprintZ             = 3,
   iconType               = [[builder]],
-  idleAutoHeal           = 5,
-  idleTime               = 1800,
   maxDamage              = 1400,
   maxVelocity            = 2.5,
-  minCloakDistance       = 75,
   minWaterDepth          = 5,
   movementClass          = [[BOAT3]],
   noAutoFire             = false,

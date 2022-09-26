@@ -230,7 +230,9 @@ end
 --------------------------------------------------------------------------------
 
 local function GetMorphRate(unitID)
-	return (Spring.GetUnitRulesParam(unitID,"baseSpeedMult") or 1)
+	-- Do not read full attributes-derived BP multiplier here because morph
+	-- disables units, causing BP mult to be zero.
+	return (Spring.GetUnitRulesParam(unitID,"baseSpeedMult") or 1) * (GG.unit_handicap and GG.unit_handicap[unitID] or 1)
 end
 
 local function StartMorph(unitID, unitDefID, teamID, morphDef)
@@ -973,6 +975,7 @@ local headingToDegree = (360 / 65535)
 local useLuaUI = false
 local oldFrame = 0		--//used to save bandwidth between unsynced->LuaUI
 local drawProgress = true --//a widget can do this job too (see healthbars)
+local morphUnitsSynced = {}
 
 --------------------------------------------------------------------------------
 --------------------------------------------------------------------------------
@@ -1074,7 +1077,7 @@ function gadget:Update()
 	local frame = GetGameFrame()
 	if frame > oldFrame then
 		oldFrame = frame
-		local morphUnitsSynced = SYNCED.morphUnits
+		morphUnitsSynced = SYNCED.morphUnits
 		if snext(morphUnitsSynced) then
 			local useLuaUI_ = Script.LuaUI('MorphUpdate')
 			if useLuaUI_ ~= useLuaUI then --//Update Callins on change
@@ -1212,9 +1215,7 @@ end
 
 local function DrawWorldFunc()
 
-	local morphUnits = SYNCED.morphUnits
-
-	if (not snext(morphUnits)) then
+	if (not snext(morphUnitsSynced)) then
 		return --//no morphs to draw
 	end
 
@@ -1233,7 +1234,7 @@ local function DrawWorldFunc()
 
 	CallAsTeam({['read'] = readTeam},
 		function()
-			for unitID, morphData in spairs(morphUnits) do
+			for unitID, morphData in spairs(morphUnitsSynced) do
 				if (unitID and morphData)and(IsUnitVisible(unitID)) then
 					if morphData.combatMorph then
 						DrawCombatMorphUnit(unitID, morphData,readTeam)
@@ -1256,15 +1257,6 @@ end
 
 function gadget:DrawWorldRefraction()
 	DrawWorldFunc()
-end
-
-local function split(msg,sep)
-	local s=sep or '|'
-	local t={}
-	for e in string.gmatch(msg..s,'([^%'..s..']+)%'..s) do
-		t[#t+1] = e
-	end
-	return t
 end
 
 function gadget:Save(zip)
