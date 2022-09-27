@@ -104,7 +104,6 @@ options_order = {
 	'autoRepair',
 	'cleanWrecks',
 	'chicken',
-	'intelliCost',
 	'alwaysShow',
 	'drawIcons',
 	'isSelectionOverrideSetOption',
@@ -159,13 +158,6 @@ options = {
 		type = 'bool',
 		desc = 'Retreats auto-repairing/reclaiming units when they\'re attacked.\n (default = true)',
 		value = false,
-	},
-
-	intelliCost = {
-		name = 'Intelligent Cost Model',
-		type = 'bool',
-		desc = 'Tries to optimize build order for better worker safety and faster overall construction, but makes it \nmore difficult to control what gets built first.\n (default = true)',
-		value = true,
 	},
 
 	alwaysShow = {
@@ -1130,10 +1122,7 @@ local function TryJobCandidate(unitID, ux, uz, hash, job, doCheckReachable)
 		end
 	end
 
-	local CostFunction = options.intelliCost.value and IntelliCost or FlatCost
-	local cost, distance = CostFunction(unitID, hash, ux, uz, jx, jz)
-
-	return cost, distance
+	return IntelliCost (unitID, hash, ux, uz, jx, jz)
 end
 
 -- This function returns the cheapest job for a given worker, given the cost model implemented in CostOfJob().
@@ -1163,7 +1152,7 @@ function FindCheapestJob(unitID)
 	end
 
 	for hash, tmpJob in pairs(buildQueue) do -- here we compare our unit to each job in the queue
-		local cost, dist = TryJobCandidate(unitID, ux, uz, hash, tmpJob, true)
+		local cost = TryJobCandidate(unitID, ux, uz, hash, tmpJob, true)
 		if cost and cost < cachedCost then -- then if there is no cached job or if tmpJob is cheaper, replace the cached job with tmpJob and update the cost
 			cachedJob = tmpJob
 			cachedCost = cost
@@ -1222,7 +1211,7 @@ function IntelliCost(unitID, hash, ux, uz, jx, jz)
 			cost = distance - 150 + 800 * (costMod - 2)
 		end
 	end
-	return cost, distance, unitDefID, costMod, isExpensive, isSmallPorc
+	return cost
 end
 
 -- This function implements the 'flat' cost model for assigning jobs.
