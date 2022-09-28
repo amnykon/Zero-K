@@ -1193,29 +1193,6 @@ function IntelliCost(unitID, hash, ux, uz, jx, jz)
 	-- Metal cost for "expensive" jobs is also based on Zero-K scaling, so you may want to adjust that if porting.
 	-- FindCheapestJob() always chooses the shortest apparent distance, so smaller cost values mean higher priority.
 
-	local cost, distance, unitDefID, costMod, isExpensive, isSmallPorc = FlatCost(unitID, hash, ux, uz, jx, jz)
-	if isSmallPorc then
-		cost = cost - 150
-	elseif costMod == 1 then -- new job
-		if isExpensive then
-			cost = distance/sqrt(sqrt(distance)) + 400
-		elseif jobID == CMD_RESURRECT then -- Prioritise resurrection
-			cost = distance - 150
-		elseif unitDefID == Solar_ID or unitDefID == Wind_ID then -- Prioritise mexes over small energy
-			cost = distance + 100
-		end
-	else -- assisting other workers
-		if isExpensive or jobID == CMD_RESURRECT then
-			cost = distance/2 + 200 * (costMod - 2)
-		elseif unitDefID == Caretaker_ID then -- allow up to two builders to build caretakers before penalty
-			cost = distance - 150 + 800 * (costMod - 2)
-		end
-	end
-	return cost
-end
-
--- This function implements the 'flat' cost model for assigning jobs.
-function FlatCost(unitID, hash, ux, uz, jx, jz)
 	local job = buildQueue[hash]
 	local distance = Distance(ux, uz, jx, jz) -- the distance between our worker and job
 
@@ -1236,24 +1213,6 @@ function FlatCost(unitID, hash, ux, uz, jx, jz)
 			end
 		end
 	end
-
-	-- The goal of the flat cost model is to provide consistent behavior that is easily directed
-	-- by the player's actions.
-
-	-- Repair, reclaim and resurrect are the same as for intelliCost.
-
-	-- All build jobs are cost=distance for starting new jobs.
-
-	-- Expensive jobs have no mobbing penalty, while small defenses
-	-- allow up to 2 workers per job before the cost increases.
-
-	-- all other small jobs have a high penalty for assisting.
-
-	-- If you want to change the assignment behavior, the stuff below is what you should edit.
-	-- Note that cost represents a distance, which is why cost modifiers use addition,
-	-- and the 'magic constants' for that were chosen based on typical map scaling.
-	-- Metal cost for "expensive" jobs is also based on Zero-K scaling, so you may want to adjust that if porting.
-	-- FindCheapestJob() always chooses the shortest apparent distance, so smaller cost values mean higher priority.
 
 	local cost
 	local unitDef = nil
@@ -1293,7 +1252,25 @@ function FlatCost(unitID, hash, ux, uz, jx, jz)
 			cost = distance + (600 * costMod) -- for all other jobs, assist is expensive
 		end
 	end
-	return cost, distance, unitDefID, costMod, isExpensive, isSmallPorc
+
+	if isSmallPorc then
+		cost = cost - 150
+	elseif costMod == 1 then -- new job
+		if isExpensive then
+			cost = distance/sqrt(sqrt(distance)) + 400
+		elseif jobID == CMD_RESURRECT then -- Prioritise resurrection
+			cost = distance - 150
+		elseif unitDefID == Solar_ID or unitDefID == Wind_ID then -- Prioritise mexes over small energy
+			cost = distance + 100
+		end
+	else -- assisting other workers
+		if isExpensive or jobID == CMD_RESURRECT then
+			cost = distance/2 + 200 * (costMod - 2)
+		elseif unitDefID == Caretaker_ID then -- allow up to two builders to build caretakers before penalty
+			cost = distance - 150 + 800 * (costMod - 2)
+		end
+	end
+	return cost
 end
 
 -- This function checks if our group includes a unit that can resurrect
