@@ -1100,6 +1100,7 @@ function GiveWorkToUnit(unitID)
 	end
 end
 
+-- as any value > math.huge will always fail, math.huge is returned for imposible tasks.
 local function TryJobCandidate(unitID, ux, uz, hash, job, doCheckReachable)
 	if not job then job = buildQueue[hash] end
 	local jx, jz, _
@@ -1107,17 +1108,17 @@ local function TryJobCandidate(unitID, ux, uz, hash, job, doCheckReachable)
 	if job.x then -- for jobs with explicit locations, or for which we've cached locations
 		jx,jz = job.x, job.z --the location of the current job
 	else -- for repair jobs and reclaim jobs targetting units
-		if unitID == job.target then return nil end -- ignore self-targeting commands
+		if unitID == job.target then return math.huge end -- ignore self-targeting commands
 		jx,_,jz = spGetUnitPosition(job.target)
 	end
 
 	if doCheckReachable then
 		-- check pathing and/or whether the worker can build the job or not (stored in the same key)
 		if includedBuilders[unitID].unreachable[hash] then -- check cached values
-			return
+			return math.huge
 		elseif not job.x then -- for jobs targeting units, which may be mobile, always calculate pathing.
 			if not CleanOrders(job, false) then
-				return
+				return math.huge
 			end
 		end
 	end
@@ -1153,7 +1154,7 @@ function FindCheapestJob(unitID)
 
 	for hash, tmpJob in pairs(buildQueue) do -- here we compare our unit to each job in the queue
 		local cost = TryJobCandidate(unitID, ux, uz, hash, tmpJob, true)
-		if cost and cost < cachedCost then -- then if there is no cached job or if tmpJob is cheaper, replace the cached job with tmpJob and update the cost
+		if cost < cachedCost then -- then if there is no cached job or if tmpJob is cheaper, replace the cached job with tmpJob and update the cost
 			cachedJob = tmpJob
 			cachedCost = cost
 		end
