@@ -108,6 +108,7 @@ options_order = {
 	'drawIcons',
 	'isSelectionOverrideSetOption',
 	'selectionOverrideRankOption',
+	'reassignCost',
 }
 
 options = {
@@ -197,7 +198,13 @@ options = {
 			 WG.GlobalBuildCommand.SelectionOverrideRank = self.value
 		end
 	},
-
+	reassignCost = {
+		name = 'reassign Cost:',
+		desc = "cost to switch the job of an already assigned worker",
+		type = 'number',
+		value = 40,
+		min = 0, max = 300, step = 1,
+	},
 }
 
 include('LuaUI/Widgets/gbc/Pathfinding.lua', nil, VFS.RAW_FIRST)
@@ -1131,8 +1138,6 @@ function FindCheapestJob(unitID)
 	local cachedJob = nil -- the cheapest job that we've seen
 	local cachedCost = math.huge -- the cost of the currently cached cheapest job
 	local ux, _, uz = spGetUnitPosition(unitID)  -- unit location
-	local unitDefID = spGetUnitDefID(unitID)
-	local buildDist = UnitDefs[unitDefID].buildDistance
 
 	-- if the worker has already been assigned to a job, we cache it first to increase job 'stickiness'
 	-- This looks redundant but it is not, because cleanorders may remove a worker from busyUnits without necessarily returning false,
@@ -1140,16 +1145,7 @@ function FindCheapestJob(unitID)
 	if busyUnits[unitID] and CleanOrders(buildQueue[busyUnits[unitID]], false) and busyUnits[unitID] then
 		local key = busyUnits[unitID]
 		cachedJob = buildQueue[key]
-
-		local cost = TryJobCandidate(unitID, ux, uz, key, cachedJob)
-
-		local moveID = UnitDefs[unitDefID].moveDef.id
-
-		if moveID then -- for ground units, cache the cost, and only very slightly reduce the cost of the current job to avoid eg. repeat turning around for builders with a low turn rate
-			cachedCost = cost - 30
-		else -- for air units, reduce the cost of their current job since they tend to wander around while building
-			cachedCost = cost - (buildDist + 40)
-		end
+		cachedCost = TryJobCandidate(unitID, ux, uz, key, cachedJob) - options.reassignCost.value
 	end
 
 	for hash, tmpJob in pairs(buildQueue) do -- here we compare our unit to each job in the queue
