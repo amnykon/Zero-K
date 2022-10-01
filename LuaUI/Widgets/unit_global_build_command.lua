@@ -593,13 +593,16 @@ local function UnitGone(unitID, unitDefID, unitTeam, doRemoveMatchingJobs)
 	if includedBuilders[unitID] then
 		local morphedTo = Spring.GetUnitRulesParam(unitID, "wasMorphedTo")
 		if morphedTo then
-			includedBuilders[morphedTo] = includedBuilders[unitID]
-			lastCommand[morphedTo] = lastCommand[unitID]
-			newBuilders[morphedTo] = newBuilders[unitID]
-			local key = busyUnits[unitID]
-			if key then
-				busyUnits[morphedTo] = key
-				buildQueue[key].assignedUnits[morphedTo] = true
+			local ud = UnitDefs[spGetUnitDefID(morphedTo)]
+			if ud.isMobileBuilder then
+				includedBuilders[morphedTo] = includedBuilders[unitID]
+				lastCommand[morphedTo] = lastCommand[unitID]
+				newBuilders[morphedTo] = newBuilders[unitID]
+				local key = busyUnits[unitID]
+				if key then
+					busyUnits[morphedTo] = key
+					buildQueue[key].assignedUnits[morphedTo] = true
+				end
 			end
 		end
 
