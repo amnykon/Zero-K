@@ -98,7 +98,6 @@ options_path = 'Settings/Unit Behaviour/Worker AI'
 
 options_order = {
 	'updateRate',
-	'separateConstructors',
 	'splitArea',
 	'autoConvertRes',
 	'autoRepair',
@@ -116,13 +115,6 @@ options = {
 		type = 'number',
 		min = 1, max = 4, step = 1,
 		value = 1,
-	},
-
-	separateConstructors = {
-		name = 'Separate Constructors',
-		type = 'bool',
-		desc = 'Replace factory inherited orders for constructors so that they can be assigned jobs immediately.\n (default = true)',
-		value = true,
 	},
 
 	splitArea = {
@@ -512,29 +504,6 @@ function widget:UnitCreated(unitID, unitDefID, unitTeam, builderID)
 			StopAnyWorker(key)
 		else -- otherwise track the unitID in activeJobs so that UnitFinished can remove it from the queue
 			activeJobs[unitID] = key
-		end
-	end
-
-	if UnitGained(unitID, unitDefID) then
-		-- constructor separator
-		if options.separateConstructors.value then -- if constructor separator is enabled
-			local facDef = UnitDefs[spGetUnitDefID(builderID)]
-			local facScale -- how far our unit will be told to move
-			if not next(buildQueue) then -- if the queue is empty, we need to increase clearance to stop the fac from getting jammed with idle workers
-				facScale = 350
-			elseif facDef.name == 'factoryship' then -- boatfac, needs a huge clearance
-				facScale = 250
-			elseif facDef.name == 'factoryhover' then -- hoverfac, needs extra clearance
-				facScale = 140
-			else -- other facs (and athenas, which are built by regular constructors)
-				facScale = 120
-			end
-
-			local dx,_,dz = spGetUnitDirection(unitID)
-			local x,y,z = spGetUnitPosition(unitID)
-			dx = dx*facScale
-			dz = dz*facScale
-			spGiveOrderToUnit(unitID, CMD_RAW_MOVE, {x+dx, y, z+dz}, 0) -- replace the fac rally orders with a short distance move.
 		end
 	end
 end
