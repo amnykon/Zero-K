@@ -103,7 +103,6 @@ options_order = {
 	'autoConvertRes',
 	'autoRepair',
 	'cleanWrecks',
-	'chicken',
 	'alwaysShow',
 	'drawIcons',
 	'isSelectionOverrideSetOption',
@@ -154,13 +153,6 @@ options = {
 		value = false,
 	},
 
-	chicken = {
-		name = 'Auto-Chicken',
-		type = 'bool',
-		desc = 'Retreats auto-repairing/reclaiming units when they\'re attacked.\n (default = true)',
-		value = false,
-	},
-
 	alwaysShow = {
 		name = 'Always Show',
 		type = 'bool',
@@ -198,6 +190,7 @@ options = {
 			 WG.GlobalBuildCommand.SelectionOverrideRank = self.value
 		end
 	},
+
 	reassignCost = {
 		name = 'reassign Cost:',
 		desc = "cost to switch the job of an already assigned worker",
@@ -216,8 +209,6 @@ commandType = {
 	drec = 'drec', -- indicates direct orders from the user, or from other source external to this widget.
 	buildQueue = 'queu', -- indicates that the worker is under GBC control.
 	idle = 'idle',
-	mov = 'mov', -- indicates that the constructor was in the way of another constructor's job, and is being moved
-	ckn = 'ckn' -- indicates that the unit is running away from enemies (only applies to autoreclaim)
 }
 
 include('LuaUI/Widgets/gbc/Rendering.lua', nil, VFS.RAW_FIRST)
@@ -291,15 +282,10 @@ local lastCommand = {} -- Mapping of units to frame of last command we sent. Wor
 local allBuilders = {} -- list of all mobile builders, which saves whether they are GBC-enabled or not.
 local newBuilders = {} -- a list of newly finished builders that have been added to includedBuilders. These units are assigned immediately on UnitIdle and then removed from the list.
 local activeJobs = {} -- list of jobs that have been started, using the UnitID of the building so that we can check completeness via UnitFinished
-local movingUnits = {} -- a list of workers that are being moved out of the way, of the form movingUnits[unitID] = lastMoveFrame
 local idleCheck = false -- flag if any units went idle
 local areaCmdList = {} -- a list of area commands, for persistently capturing individual reclaim/repair/resurrect jobs from LOS-limited areas. Same form as buildQueue.
 local reassignedUnits = {} -- list of units that have already been assigned/reassigned jobs and which don't need to be reassigned until we've cycled through all workers.
 local hasRes = false
-
-local territoryPos = {x = 0, z = 0}
-local territoryCount = 0
-local territoryCenter = {x = 0, z = 0}
 
 --------------------------------------------------------------------------------
 
@@ -371,7 +357,6 @@ function widget:GameFrame(thisFrame)
 	end
 
 	if frame % 30 == 0 then
-		CheckMovingUnits()
 		CleanBuilders() -- remove any dead/captured/nonexistent constructors from includedBuilders and update bookkeeping
 		for _, cmd in pairs(buildQueue) do -- perform validity checks for all the jobs in the queue, and remove any which are no longer valid
 			if not cmd.tfparams then -- ZK-specific: prevents combo TF-build operations from being removed by CleanOrders until the terraform is finished.
@@ -475,22 +460,6 @@ end
 -- Returns true if this is now one of our units that we should immediately direct.
 function UnitGained(unitID, unitDefID, unitTeam, doInitialCheck)
 	if unitTeam ~= myTeamID then return end
-
-	-- update territory info when new mexes are created.
-	if unitDefID == Mex_ID and not doInitialCheck then
-		-- To make sure Gained and Gone have a one to one relationship wrt
-		-- territory processing, only update territory center on completed mexes.
-		local _,_,nanoframe = spGetUnitIsStunned(unitID)
-		if not nanoframe then
-			local x, _, z = spGetUnitPosition(unitID)
-			territoryPos.x = territoryPos.x + x
-			territoryPos.z = territoryPos.z + z
-			territoryCount = territoryCount + 1
-			territoryCenter.x = territoryPos.x/territoryCount
-			territoryCenter.z = territoryPos.z/territoryCount
-		end
-		return false
-	end
 
 	local ud = UnitDefs[unitDefID]
 	if not ud.isMobileBuilder then return false end
@@ -622,20 +591,6 @@ local function UnitGone(unitID, unitDefID, unitTeam, doRemoveMatchingJobs)
 		allBuilders[unitID] = nil
 		RenderCleanupUnit(unitID)
 	end
-
-	if unitDefID == Mex_ID then
-		local x, _, z = spGetUnitPosition(unitID)
-		territoryPos.x = territoryPos.x - x
-		territoryPos.z = territoryPos.z - z
-		territoryCount = territoryCount - 1
-		if territoryCount > 0 then
-			territoryCenter.x = territoryPos.x/territoryCount
-			territoryCenter.z = territoryPos.z/territoryCount
-		else
-			territoryPos.x = 0
-			territoryPos.z = 0
-		end
-	end
 end
 
 -- This function cleans up when workers or building nanoframes are killed
@@ -671,26 +626,6 @@ function widget:UnitDamaged(unitID, unitDefID, unitTeam, damage, paralyzer, weap
 				UpdateOneJobPathing(hash, includedBuilders, buildQueue)
 			end
 		end
-	end
-
-	-- chicken autoreclaiming units to the center of your territory if they get attacked.
-	if busyUnits[unitID] and includedBuilders[unitID].cmdtype == commandType.buildQueue
-	  and ((options.cleanWrecks.value and buildQueue[busyUnits[unitID]].id == CMD_RECLAIM) or (options.autoRepair.value and buildQueue[busyUnits[unitID]].id == CMD_REPAIR))
-	  and options.chicken.value and territoryCount > 0 then
-		local job = buildQueue[busyUnits[unitID]]
-		if job.id == CMD_REPAIR and job.target then
-			local unitDef = UnitDefs[spGetUnitDefID(job.target)]
-			if unitDef and unitDef.isImmobile and unitDef.reloadTime > 0 then
-				return -- don't retreat units that are repairing porc, since continuing to repair the porc is safer!
-			end
-		end
-		spGiveOrderToUnit(unitID, CMD_REMOVE, {CMD_REPAIR}, CMD_OPT_ALT) -- remove repair/reclaim orders
-		spGiveOrderToUnit(unitID, CMD_REMOVE, {CMD_RECLAIM}, CMD_OPT_ALT)
-		spGiveOrderToUnit(unitID, CMD_STOP, EMPTY_TABLE, 0)
-		local y = spGetGroundHeight(territoryCenter.x, territoryCenter.z)
-		spGiveOrderToUnit(unitID, CMD_RAW_MOVE, {territoryCenter.x, y, territoryCenter.z}, 0)
-		UnassignWorker(nil, unitID, commandType.ckn)
-		movingUnits[unitID] = frame
 	end
 end
 
@@ -1397,7 +1332,6 @@ function CheckIdlers()
 					newBuilders[unitID] = nil
 					GiveWorkToUnit(unitID)
 				else
-					movingUnits[unitID] = nil
 					if wasBusyJob then -- if the worker was also still on our busy list
 						if areaCmdList[wasBusyJob] then -- if it was an area command
 							areaCmdList[wasBusyJob] = nil -- remove it from the area update list
@@ -1410,29 +1344,6 @@ function CheckIdlers()
 	end
 	table.clear(idlers) -- clear the idle list, since we've processed it.
 	idleCheck = false -- reset the flag
-end
-
--- this function checks units that are on commandType.mov and unsticks them if they have been moving for more than 5 seconds.
-function CheckMovingUnits()
-	for unitID, lastMovFrame in pairs(movingUnits) do
-		if spValidUnitID(unitID) and spIsUnitAllied(unitID) and not spUnitIsDead(unitID) then -- sanity check
-			if includedBuilders[unitID].cmdtype == commandType.mov and frame - lastMovFrame > 150 then
-				local x,y,z = spGetUnitPosition(unitID)
-				local dx, _, dz = spGetUnitDirection(unitID)
-				dx = dx*-125
-				dz = dz*-125
-				spGiveOrderToUnit(unitID, CMD_RAW_MOVE, {x+dx, y, z+dz}, 0) -- move it in the opposite direction it was facing.
-				movingUnits[unitID] = frame
-			elseif includedBuilders[unitID].cmdtype == commandType.ckn and frame - lastMovFrame > 600 then
-				spGiveOrderToUnit(unitID, CMD_REMOVE, {CMD_RAW_MOVE}, CMD_OPT_ALT) -- remove the current order
-				-- note: options "alt" with CMD_REMOVE tells it to use params as command ids, which is what we want.
-				spGiveOrderToUnit(unitID, CMD_STOP, EMPTY_TABLE, 0) -- and replace it with a stop order
-				UnassignWorker(nil, unitID, commandType.idle)
-			end
-		else -- for units that are actually dead, etc.
-			movingUnits[unitID] = nil
-		end
-	end
 end
 
 local function AutoAddFeatureJob(type, featureID)
@@ -1544,15 +1455,6 @@ function CleanOrders(cmd, isNew)
 						activeJobs[blockerID] = nil -- note this only stops a tiny space leak should a free starting fac be added to the queue
 						-- but it was cheap, so whatever.
 					end
-				elseif canBuildThisThere == blockageType.mobiles and includedBuilders[blockerID] and UnitDefs[blockerDefID].moveDef.id and (includedBuilders[blockerID].cmdtype == commandType.idle or includedBuilders[blockerID].cmdtype == commandType.buildQueue) and next(cmd.assignedUnits) then
-				-- if blocked by a mobile unit, and it's one of our constructors, and not a flying unit, and it's not under direct orders, and there's actually a worker assigned to the job...
-					local x,y,z = spGetUnitPosition(blockerID)
-					local dx, dz = GetNormalizedDirection(cx, cz, x, z)
-					dx = dx*75
-					dz = dz*75
-					spGiveOrderToUnit(blockerID, CMD_RAW_MOVE, {x+dx, y, z+dz}, 0) -- move it out of the way
-					UnassignWorker(nil, blockerID, commandType.mov) -- and mark it with a special state so the move order doesn't get clobbered
-					movingUnits[blockerID] = frame
 				end
 			end
 
@@ -1790,7 +1692,6 @@ end
 -- Marks a worker as not assigned to one of our jobs.
 -- when cmdtype is nil, removes all state related to the unit.
 function UnassignWorker(key, unitID, cmdtype)
-	movingUnits[unitID] = nil
 	if cmdtype == commandType.idle then
 		reassignedUnits[unitID] = nil -- Remove them from our reassigned units list, so that they will be immediately processed
 	end
