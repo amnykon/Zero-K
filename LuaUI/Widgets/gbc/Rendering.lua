@@ -50,12 +50,9 @@ local res_color = {0.4, 0.8, 1.0, 1.0}
 
 local imgpath = "LuaUI/Images/commands/Bold/"
 local no_icon = {name = 'gbcicon'}
-local noidle_icon = {name = 'gbcidle'}
-local idle_icon = {name = 'gbcidle', texture=imgpath .. "buildsmall.png"}
+local idle_icon = {name = 'gbcicon', texture=imgpath .. "buildsmall.png"}
 local queue_icon = {name = 'gbcicon', texture=imgpath .. "build_light.png", color=queueColor}
 local drec_icon = {name = 'gbcicon', texture=imgpath .. "action.png", color=statusColor}
-local move_icon = {name = 'gbcicon', texture=imgpath .. "move.png", color=statusColor}
-local chicken_icon = {name = 'gbcidle', texture="LuaUI/Images/commands/states/retreat_90.png"} -- the chicken icon uses the idle icon slot because it flashes
 
 -- drawing lists for GL
 local buildList = {}
@@ -119,22 +116,12 @@ function RenderUpdate(dt, includedBuilders, allBuilders, buildQueue)
 			lastUnitCmdTypeByUnit[unitID] = newUnitCmdType
 			if newUnitCmdType == commandType.idle then
 				WG.icons.SetUnitIcon(unitID, idle_icon)
-				WG.icons.SetUnitIcon(unitID, no_icon)
-			elseif newUnitCmdType == commandType.ckn then
-				WG.icons.SetUnitIcon(unitID, chicken_icon)
-				WG.icons.SetUnitIcon(unitID, no_icon) -- disable the non-idle/chicken icons
 			elseif newUnitCmdType == commandType.buildQueue then
 				WG.icons.SetUnitIcon(unitID, queue_icon)
-				WG.icons.SetUnitIcon(unitID, noidle_icon)
-			elseif newUnitCmdType == commandType.mov then
-				WG.icons.SetUnitIcon(unitID, move_icon)
-				WG.icons.SetUnitIcon(unitID, noidle_icon)
 			elseif newUnitCmdType == commandType.drec then
 				WG.icons.SetUnitIcon(unitID, drec_icon)
-				WG.icons.SetUnitIcon(unitID, noidle_icon)
 			elseif newUnitCmdType == "unincluded" then
 				WG.icons.SetUnitIcon(unitID, no_icon)
-				WG.icons.SetUnitIcon(unitID, noidle_icon)
 			else
 				WG.Debug.Yell('GBC:RenderUpdate: newUnitCmdType', newUnitCmdType, 'is not handled')
 			end
@@ -341,6 +328,5 @@ end
 
 function RenderCleanupUnit(unitID)
 	WG.icons.SetUnitIcon(unitID, no_icon)
-	WG.icons.SetUnitIcon(unitID, noidle_icon)
 	lastUnitCmdTypeByUnit[unitID] = nil
 end
