@@ -39,6 +39,10 @@ local renderAtPos = {}
 
 -- Forward function declarations
 local GotHotkeypress = function() end
+<<<<<<< Updated upstream
+=======
+local SetModeToDynamic = function() end
+>>>>>>> Stashed changes
 local UpdateDynamic = function() end
 
 -- Localized Spring functions
@@ -177,8 +181,12 @@ function GotHotkeypress()
 		waiting_on_double = false
 		target_mode = nil
 		kp_timer = nil
+<<<<<<< Updated upstream
 		current_mode = "Dynamic"
 		UpdateDynamic()
+=======
+		SetModeToDynamic()
+>>>>>>> Stashed changes
 	else
 		waiting_on_double = true
 		kp_timer = spGetTimer()
@@ -194,6 +202,22 @@ function GotHotkeypress()
 	end
 end
 
+<<<<<<< Updated upstream
+=======
+function SetModeToDynamic()
+	current_mode = "Dynamic"
+	if testHeight < options.icontransitiontop.value then
+		spSendCommands("disticon " .. 100000)
+		showing_icons = false
+		drawIcons = true
+	else
+		spSendCommands("disticon " .. 0)
+		showing_icons = true
+	end
+
+end
+
+>>>>>>> Stashed changes
 function UpdateDynamic()
 	local cs = spGetCameraState()
 	local gy = spGetGroundHeight(cs.px, cs.pz)
@@ -203,12 +227,16 @@ function UpdateDynamic()
 	elseif cs.name == "ta" then
 		testHeight = cs.height - gy
 	end
-	
+
 	-- Leave a one update gap between enabling engine icons and disabling widget drawing.
 	if showing_icons and drawIcons then
 		drawIcons = false
 	end
+<<<<<<< Updated upstream
 	
+=======
+
+>>>>>>> Stashed changes
 	if showing_icons and testHeight < options.icontransitiontop.value - tolerance then
 		spSendCommands("disticon " .. 100000)
 		showing_icons = false
@@ -308,7 +336,7 @@ local function DrawWorldFunc()
 	if (not drawIcons) or (testHeight < options.icontransitionbottom.value) then
 		return
 	end
-	
+
 	local scale, opacity
 	scale = options.icontransitionminsize.value + (options.icontransitionmaxsize.value - options.icontransitionminsize.value) * (testHeight - options.icontransitionbottom.value) / (options.icontransitiontop.value - options.icontransitionbottom.value)
 	opacity = options.icontransitionminopacity.value + (options.icontransitionmaxopacity.value - options.icontransitionminopacity.value) * (testHeight - options.icontransitionbottom.value) / (options.icontransitiontop.value - options.icontransitionbottom.value)
@@ -318,7 +346,7 @@ local function DrawWorldFunc()
 	glDepthMask(true)
 	glDepthTest(false)
 	glAlphaTest(GL_GREATER, 0.001)
-	
+
 	-- this is probably faster than spIsUnitInView() for all the units
 	-- but that's probably worth testing to confirm
 	local unitsInView = spGetVisibleUnits(-1, nil, true)
@@ -326,11 +354,11 @@ local function DrawWorldFunc()
 	for k, v in pairs(unitsInView) do
 		unitIsInView[v] = true
 	end
-	
+
 	if scale > options.icontransitionmaxsize.value then
 		scale = options.icontransitionmaxsize.value
 	end
-	
+
 	for i, unitDefIDs in ipairs(renderOrders) do
 		for unitDefID, iconDef in pairs(unitDefIDs) do
 			if iconDef then
@@ -352,7 +380,7 @@ local function DrawWorldFunc()
 			end
 		end
 	end
-	
+
 	glTexture(false)
 	glAlphaTest(false)
 	glDepthTest(false)
@@ -368,8 +396,12 @@ function widget:Initialize()
 	waiting_on_double = false
 	target_mode = nil
 	kp_timer = nil
+<<<<<<< Updated upstream
 	current_mode = "Dynamic"
 	UpdateDynamic()
+=======
+	SetModeToDynamic()
+>>>>>>> Stashed changes
 
 	local allUnits = spGetAllUnits()
 	for _,unitID in pairs (allUnits) do
@@ -385,15 +417,15 @@ function widget:Shutdown()
 end
 
 function widget:Update()
-	
+
 	if not waiting_on_double and current_mode ~= "Dynamic" then
 		-- We're not waiting, so there wasn't an earlier single keypress, so don't switch modes
 		-- And the current mode isn't dynamic, so don't check camera height
 		return
 	end
-	
+
 	-- We're either waiting, or in dynamic mode, or both
-	
+
 	-- If we're waiting, check to see if the time is up, and if so, then act on the earlier single keypress,
 	-- which means changing the mode to either On or Off (depending on the state when the key was pressed)
 	if waiting_on_double then
@@ -414,7 +446,7 @@ function widget:Update()
 			drawIcons = false
 		end
 	end
-	
+
 	-- If the current mode (potentially after toggling to On or Off above) is dynamic,
 	-- check and set the current height so the draw functions have the right height, and
 	-- check to see if disticon should be changed because of the height
