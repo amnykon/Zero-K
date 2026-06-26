@@ -2261,6 +2261,19 @@ function widget:VisibleUnitsChanged(extVisibleUnits, extNumVisibleUnits)
 	myPlayerID = Spring.GetMyPlayerID()
 
 	clearInstanceTable(healthBarVBO) -- clear all instances
+	-- Purge icon/group/command state for units that are no longer in the visible set.
+	-- VisibleUnitsChanged replaces the whole set without individual VisibleUnitRemoved
+	-- events, so stale entries would persist in wgUnitIcons and could be applied to a
+	-- newly-spawned unit if the engine recycles the same unitID before the next DrawWorld.
+	for unitID in pairs(wgUnitIcons) do
+		if not extVisibleUnits[unitID] then
+			wgUnitIcons[unitID] = nil
+			wgUnitCommand[unitID] = nil
+		end
+	end
+	for unitID in pairs(wgUnitGroup) do
+		if not extVisibleUnits[unitID] then wgUnitGroup[unitID] = nil end
+	end
 	requeueAllIcons()
 	for unitID, unitDefID in pairs(extVisibleUnits) do
 		addBarsForUnit(unitID, unitDefID, Spring.GetUnitTeam(unitID), nil, "VisibleUnitsChanged") -- TODO: add them with noUpload = true
