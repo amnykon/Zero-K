@@ -39,6 +39,29 @@ local function isScoutCommand(cmdID)
 	return scoutCmdPos[cmdID] ~= nil
 end
 
+-- Bomber area-attack commands (see cmd_bomber_attack_order.lua). One button per
+-- bomber type, plus a second Odin button for its shield dgun. Own tab, like the
+-- missile launch tab, independent of the current selection.
+-- Row 1: splash bombers and Odin's two buttons. Row 2: precision (non-splash).
+local bomberCmds = {
+	{id = 10287, name = "Phoenix Run", icon = "bomberriot", col = 1, row = 1, tooltip = "Phoenix Napalm Run\nDrag a circle; Phoenixes spread saturation napalm across the targets."},
+	{id = 10288, name = "Likho Run", icon = "bomberheavy", col = 2, row = 1, tooltip = "Likho Run\nDrag a circle; Likhos spread singularity bombs across the targets."},
+	{id = 10289, name = "Thunderbird Run", icon = "bomberdisarm", col = 3, row = 1, tooltip = "Thunderbird Run\nDrag a circle; Thunderbirds spread disarm strikes across the targets."},
+	{id = 10290, name = "Odin Run", icon = "bomberassault", col = 4, row = 1, tooltip = "Odin Assault Run\nDrag a circle; Odins spread their bombs across the targets."},
+	{id = 10291, name = "Odin Shield", icon = "bomberassault", texture = imageDir .. 'Bold/dgun.png', col = 5, row = 1, tooltip = "Odin Shield Run\nDrag a circle; Odins deploy their shield dgun over the targets."},
+	{id = 10292, name = "Magpie Run", icon = "bomberstrike", col = 1, row = 2, tooltip = "Magpie Strike\nDrag a circle; Magpies focus-fire each target with enough strikes to kill it before moving on."},
+	{id = 10293, name = "Raven Run", icon = "bomberprec", col = 2, row = 2, tooltip = "Raven Precision Strike\nDrag a circle; Ravens focus-fire each target with enough bombs to kill it before moving on."},
+}
+
+local bomberCmdPos = {}
+for _, bomber in ipairs(bomberCmds) do
+	bomberCmdPos[bomber.id] = {col = bomber.col, row = bomber.row}
+end
+
+local function isBomberCommand(cmdID)
+	return bomberCmdPos[cmdID] ~= nil
+end
+
 --------------------------------------------------------------------------------
 --------------------------------------------------------------------------------
 -- Tooltips
@@ -542,6 +565,16 @@ for _, scout in ipairs(scoutCmds) do
 	}
 end
 
+for _, bomber in ipairs(bomberCmds) do
+	local unitDef = UnitDefNames[bomber.icon]
+	local icon = bomber.texture or (unitDef and ("#" .. unitDef.id)) or (imageDir .. 'Bold/attack.png')
+	commandDisplayConfig[bomber.id] = {
+		texture = icon,
+		tooltip = bomber.tooltip,
+		drawName = true, -- show the available bomber count (set by the widget)
+	}
+end
+
 local function hasMissileUnits()
 	local teamUnits = Spring.GetTeamUnits(Spring.GetMyTeamID()) or {}
 	local missileUnitNames = {
@@ -574,6 +607,29 @@ local function hasScoutUnits()
 		if unitDefID then
 			local unitDef = UnitDefs[unitDefID]
 			if unitDef and (unitDef.name == "planefighter" or unitDef.name == "planelightscout") then
+				return true
+			end
+		end
+	end
+	return false
+end
+
+local bomberUnitNames = {
+	["bomberriot"] = true,
+	["bomberheavy"] = true,
+	["bomberdisarm"] = true,
+	["bomberassault"] = true,
+	["bomberstrike"] = true,
+	["bomberprec"] = true,
+}
+
+local function hasBomberUnits()
+	local teamUnits = Spring.GetTeamUnits(Spring.GetMyTeamID()) or {}
+	for _, unitID in ipairs(teamUnits) do
+		local unitDefID = Spring.GetUnitDefID(unitID)
+		if unitDefID then
+			local unitDef = UnitDefs[unitDefID]
+			if unitDef and bomberUnitNames[unitDef.name] then
 				return true
 			end
 		end
@@ -615,6 +671,22 @@ local commandPanels = {
 		returnOnClick = "orders",
 	},
 	{
+		humanName = "Bombers",
+		name = "bombers",
+		inclusionFunction = function(cmdID)
+			if not hasBomberUnits() then return false end
+			local pos = bomberCmdPos[cmdID]
+			return pos ~= nil, pos
+		end,
+		loiterable = true,
+		alwaysShowTab = true,
+		topRow = true,
+		buttonLayoutConfig = buttonLayoutConfig.command,
+		badgeIconsWG = "bomberActiveIcons",
+		gridHotkeys = true,
+		returnOnClick = "orders",
+	},
+	{
 		humanName = "Orders",
 		name = "orders",
 		inclusionFunction = function(cmdID, factoryUnitDefID, forceOrdersCommand, unitMobilePanelSize)
@@ -622,7 +694,8 @@ local commandPanels = {
 				not buildCmdEconomy[cmdID] and not buildCmdFactory[cmdID] and
 				not buildCmdSpecial[cmdID] and not buildCmdDefence[cmdID] and
 				not plateCommandID[cmdID] and
-				not isMissileCommand(cmdID) and not isScoutCommand(cmdID))
+				not isMissileCommand(cmdID) and not isScoutCommand(cmdID) and
+				not isBomberCommand(cmdID))
 		end,
 		loiterable = true,
 		buttonLayoutConfig = buttonLayoutConfig.command,
