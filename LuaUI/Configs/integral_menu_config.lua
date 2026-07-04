@@ -1,5 +1,27 @@
 local buildCmdFactory, buildCmdEconomy, buildCmdDefence, buildCmdSpecial, buildCmdUnits, cmdPosDef, factoryUnitPosDef = include("Configs/integral_menu_commands_processed.lua", nil, VFS.RAW_FIRST)
 
+-- Row 1: Trinity and Reef (standalone, not silo missiles).
+-- Row 2: the missile silo's missiles, in the silo's buildoptions order
+-- (tacnuke, seismic, empmissile, napalmmissile, missileslow).
+local missileCmds = {
+	{id = 39615, name = "Trinity", icon = "staticnuke", col = 1, row = 1, tooltip = "Launch Trinity (Strategic Nuke)\nLong-range nuclear missile."},
+	{id = 39614, name = "Reef Missile", icon = "shipcarrier", col = 2, row = 1, tooltip = "Launch Disarm Missile\nDisables units temporarily."},
+	{id = 39610, name = "EOS", icon = "tacnuke", col = 1, row = 2, tooltip = "Launch EOS (Tactical Nuke)\nTactical nuclear missile with high damage."},
+	{id = 39611, name = "Seismic", icon = "seismic", col = 2, row = 2, tooltip = "Launch Seismic\nArea denial seismic missile, slows units."},
+	{id = 39612, name = "Shockley", icon = "empmissile", col = 3, row = 2, tooltip = "Launch Shockley (EMP)\nElectromagnetic pulse missile disables units."},
+	{id = 39613, name = "Inferno", icon = "napalmmissile", col = 4, row = 2, tooltip = "Launch Inferno (Napalm)\nNapalm missile with persistent damage."},
+	{id = 39616, name = "Zeno", icon = "missileslow", col = 5, row = 2, tooltip = "Launch Zeno (Slow Missile)\nSlow homing missile with lingering damage."},
+}
+
+local missileCmdPos = {}
+for _, missile in ipairs(missileCmds) do
+	missileCmdPos[missile.id] = {col = missile.col, row = missile.row}
+end
+
+local function isMissileCommand(cmdID)
+	return missileCmdPos[cmdID] ~= nil
+end
+
 --------------------------------------------------------------------------------
 --------------------------------------------------------------------------------
 -- Tooltips
@@ -90,7 +112,6 @@ local commandDisplayConfig = {
 	[CMD_EMBARK] = {texture = imageDir .. 'Bold/embark.png'},
 	[CMD_DISEMBARK] = {texture = imageDir .. 'Bold/disembark.png'},
 
-	[CMD_ONECLICK_WEAPON] = {},--texture = imageDir .. 'Bold/action.png'},
 	[CMD_UNIT_SET_TARGET_CIRCLE] = {texture = imageDir .. 'Bold/settarget.png'},
 	[CMD_UNIT_CANCEL_TARGET] = {texture = imageDir .. 'Bold/canceltarget.png'},
 
@@ -102,7 +123,13 @@ local commandDisplayConfig = {
 	[CMD_GBCANCEL] = { texture = imageDir .. 'Bold/stopbuild.png'},
 
 	[CMD_RECALL_DRONES] = {texture = imageDir .. 'Bold/recall_drones.png'},
-
+	
+	[CMD_MORPH_STOP] = {
+		DynamicDisplayFunc = function (cmdID, command)
+			return {texture = imageDir .. 'Bold/cancel.png', tex2 = command.texture}
+		end
+	},
+	
 	-- states
 	[CMD_WANT_ONOFF] = {
 		texture = {imageDir .. 'states/off.png', imageDir .. 'states/on.png'},
@@ -266,13 +293,15 @@ local commandDisplayConfig = {
 			imageDir .. 'states/overkill_off.png',
 			imageDir .. 'states/overkill_auto_target.png',
 			imageDir .. 'states/overkill_fire_at_will.png',
-			imageDir .. 'states/overkill_on.png'
+			imageDir .. 'states/overkill_on_except_single.png',
+			imageDir .. 'states/overkill_on.png',
 		},
 		stateTooltip = {
 			tooltips.PREVENT_OVERKILL:gsub("_STATE_", "Disabled"),
 			tooltips.PREVENT_OVERKILL:gsub("_STATE_", "Enabled for automatic targeting"),
 			tooltips.PREVENT_OVERKILL:gsub("_STATE_", "Enabled when set to Fire At Will"),
-			tooltips.PREVENT_OVERKILL:gsub("_STATE_", "Always")
+			tooltips.PREVENT_OVERKILL:gsub("_STATE_", "Enabled except for single attack command"),
+			tooltips.PREVENT_OVERKILL:gsub("_STATE_", "Always"),
 		}
 	},
 	[CMD.TRAJECTORY] = {
@@ -476,7 +505,58 @@ local factoryButtonLayoutOverride = {
 	}
 }
 
+for _, missile in ipairs(missileCmds) do
+	local unitDef = UnitDefNames[missile.icon]
+	local icon = unitDef and ("#" .. unitDef.id) or (imageDir .. 'Bold/attack.png')
+	commandDisplayConfig[missile.id] = {
+		texture = icon,
+		tooltip = missile.tooltip,
+		drawName = true, -- show the stockpile count / build progress string (set by the missile widget)
+	}
+end
+
+local function hasMissileUnits()
+	local teamUnits = Spring.GetTeamUnits(Spring.GetMyTeamID()) or {}
+	local missileUnitNames = {
+		["tacnuke"] = true,
+		["subtacmissile"] = true,
+		["seismic"] = true,
+		["empmissile"] = true,
+		["napalmmissile"] = true,
+		["missileslow"] = true,
+		["shipcarrier"] = true,
+		["staticnuke"] = true,
+		["staticmissilesilo"] = true,
+	}
+	for _, unitID in ipairs(teamUnits) do
+		local unitDefID = Spring.GetUnitDefID(unitID)
+		if unitDefID then
+			local unitDef = UnitDefs[unitDefID]
+			if unitDef and missileUnitNames[unitDef.name] then
+				return true
+			end
+		end
+	end
+	return false
+end
+
 local commandPanels = {
+	{
+		humanName = "Launch",
+		name = "missiles",
+		inclusionFunction = function(cmdID)
+			if not hasMissileUnits() then return false end
+			local pos = missileCmdPos[cmdID]
+			return pos ~= nil, pos
+		end,
+		loiterable = true,
+		alwaysShowTab = true,
+		topRow = true,
+		buttonLayoutConfig = buttonLayoutConfig.command,
+		badgeIconsWG = "missileActiveIcons",
+		gridHotkeys = true,
+		returnOnClick = "orders",
+	},
 	{
 		humanName = "Orders",
 		name = "orders",
@@ -484,7 +564,8 @@ local commandPanels = {
 			return ((cmdID >= 0 or unitMobilePanelSize == 1) and
 				not buildCmdEconomy[cmdID] and not buildCmdFactory[cmdID] and
 				not buildCmdSpecial[cmdID] and not buildCmdDefence[cmdID] and
-				not plateCommandID[cmdID])
+				not plateCommandID[cmdID] and
+				not isMissileCommand(cmdID))
 		end,
 		loiterable = true,
 		buttonLayoutConfig = buttonLayoutConfig.command,
@@ -641,7 +722,12 @@ end
 local modCommands = VFS.Include("LuaRules/Configs/modCommandsDefs.lua")
 for i = 1, #modCommands do
 	local cmd = modCommands[i]
-	commandDisplayConfig[cmd.cmdID] = {tooltip = cmd.tooltip, texture = cmd.image, stateTooltip = cmd.stateTooltip}
+	commandDisplayConfig[cmd.cmdID] = {
+		tooltip = cmd.tooltip,
+		texture = cmd.image,
+		stateTooltip = cmd.stateTooltip,
+		DynamicDisplayFunc = cmd.DynamicDisplayFunc,
+	}
 end
 
 --------------------------------------------------------------------------------

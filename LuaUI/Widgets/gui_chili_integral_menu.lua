@@ -45,6 +45,9 @@ local custom_cmd_actions = include("Configs/customCmdTypes.lua")
 local cullingSettingsList, commandCulling =  include("Configs/integral_menu_culling.lua")
 local transkey = include("Configs/transkey.lua")
 
+local iconTypesPath = LUAUI_DIRNAME.."Configs/icontypes.lua"
+local icontypes = VFS.FileExists(iconTypesPath) and VFS.Include(iconTypesPath)
+
 -- Chili classes
 local Chili
 local Button
@@ -95,7 +98,6 @@ local NO_TEXT = ""
 local NO_TOOLTIP = "NONE"
 
 EPIC_NAME = "epic_chili_integral_menu_"
-EPIC_NAME_UNITS = "epic_chili_integral_menu_tab_units"
 
 local modOptions = Spring.GetModOptions()
 local disabledTabs = {}
@@ -122,22 +124,47 @@ end
 
 local commandPanels, commandPanelMap, commandDisplayConfig, hiddenCommands, textConfig, buttonLayoutConfig, instantCommands, cmdPosDef = include("Configs/integral_menu_config.lua")
 
+-- Commands whose displayConfig requests it draw their command.name (count / progress string) like stockpile.
+for cmdID, displayConfig in pairs(commandDisplayConfig) do
+	if displayConfig.drawName then
+		DRAW_NAME_COMMANDS[cmdID] = true
+	end
+end
+
 local statePanel = {}
 local tabPanel
 local selectionIndex = 0
+local lastSelectionSignature = false -- to detect selection changes for tab defaulting
 local background
 local returnToOrdersCommand = false
 local simpleModeEnabled = true
 
 local buildTabHolder, buttonsHolder -- Required for padding update setting
+local mainWindow, baseWindowHeight, buttonAreaHeight -- Required for growing the menu for a second tab row
 --------------------------------------------------------------------------------
 --------------------------------------------------------------------------------
 -- Widget Options
 
+local radarIconSize = nil
+local function UpdateRadarIconSizeString(size)
+	size = tonumber(size) 
+	if size then
+		radarIconSize = string.format('%d%%', size)
+	end
+end
+
+local function UpdateRadarIcons(size)
+	UpdateRadarIconSizeString(size)
+	for i = 1, #commandPanels do
+		local buttons = commandPanels[i].buttons
+		buttons.UpdateRadarIcons()
+	end
+end
+
 options_path = 'Settings/HUD Panels/Command Panel'
 options_order = {
 	'simple_mode', 'enable_return_fire', 'enable_roam',
-	'background_opacity', 'keyboardType2',  'selectionClosesTab', 'selectionClosesTabOnSelect', 'altInsertBehind',
+	'background_opacity',  'allowclickthrough', 'show_radar_icons', 'radar_icon_size', 'keyboardType2',  'selectionClosesTab', 'selectionClosesTabOnSelect', 'altInsertBehind',
 	'unitsHotkeys2', 'ctrlDisableGrid', 'hide_when_spectating', 'applyCustomGrid', 'label_apply',
 	'label_tab', 'tab_economy', 'tab_defence', 'tab_special', 'tab_factory', 'tab_units',
 	'tabFontSize', 'leftPadding', 'rightPadding', 'flushLeft', 'fancySkinning',
@@ -213,6 +240,38 @@ options = {
 			background:Invalidate()
 		end,
 	},
+	allowclickthrough = {
+		name = 'Allow clicking through',
+		type='bool',
+		value=false,
+		desc = 'Mouse clicks through empty parts of the panel act on whatever is underneath.',
+		OnChange = function(self)
+			if background then
+				background.noClickThrough = not self.value
+				background:Invalidate()
+			end
+		end,
+	},
+	show_radar_icons = {
+		name = 'Show Radar Icons',
+		type='bool',
+		value=false,
+		update_on_the_fly=true,
+		desc = 'Displays the unit radar icons in the top-right corner of their build button in the command panel.',
+		OnChange = function(self)
+			UpdateRadarIcons(self.value)
+		end,
+	},
+	radar_icon_size = {
+		name = "Radar Icon Size",
+		type = "number",
+		value = 50, min = 1, max = 100, step = 1,
+		update_on_the_fly=true,
+		desc = 'Determines the size of the unit radar icons in the command panel.',
+		OnChange = function(self)
+			UpdateRadarIcons(self.value)
+		end,
+	},
 	keyboardType2 = {
 		type='radioButton',
 		name='Grid Keyboard Layout',
@@ -220,7 +279,9 @@ options = {
 			{name = 'QWERTY (standard)',key = 'qwerty', hotkey = nil},
 			{name = 'QWERTZ (central Europe)', key = 'qwertz', hotkey = nil},
 			{name = 'AZERTY (France)', key = 'azerty', hotkey = nil},
+			{name = 'Colemak (standard)', key = 'colemak', hotkey = nil},
 			{name = 'Dvorak (standard)', key = 'dvorak', hotkey = nil},
+			{name = 'Workman (standard)', key = 'workman', hotkey = nil},
 			{name = 'Configure in "Custom" (below)', key = 'custom', hotkey = nil},
 			{name = 'Disable Grid Keys', key = 'none', hotkey = nil},
 		},
@@ -278,7 +339,7 @@ options = {
 	label_apply = {
 		type = 'text',
 		name = 'Note: Click above to refresh',
-		value = 'Update modified custom grid hotkeys by clicking the button above. Reselecting any selected units may also be required. Note that "Apply Changes" can be bound to a key for convinence.',
+		value = 'Update modified custom grid hotkeys by clicking the button above. Reselecting any selected units may also be required. Note that "Apply Changes" can be bound to a key for convenience.',
 		path = customGridPath
 	},
 	label_tab = {
@@ -554,6 +615,7 @@ local buttonsByCommand = {}
 local alreadyRemovedTag = {}
 local lastRemovedTagResetFrame = false
 
+
 --------------------------------------------------------------------------------
 --------------------------------------------------------------------------------
 -- Utility
@@ -597,7 +659,9 @@ end
 
 local function UpdateReturnToOrders(cmdID)
 	if returnToOrdersCommand and returnToOrdersCommand ~= cmdID then
-		commandPanelMap.orders.tabButton.DoClick()
+		if commandPanelMap.orders.tabButton.IsTabPresent() then
+			commandPanelMap.orders.tabButton.DoClick()
+		end
 		returnToOrdersCommand = false
 	end
 	
@@ -855,10 +919,16 @@ local function GetCmdPosParameters(cmdID)
 	return 1, 100
 end
 
-local function GetDisplayConfig(cmdID)
+local function GetDisplayConfig(cmdID, command)
 	local displayConfig = commandDisplayConfig[cmdID]
+	if cmdID >= CMD_MORPH_STOP and cmdID < CMD_MORPH_STOP + 1000 then
+		displayConfig = commandDisplayConfig[CMD_MORPH_STOP]
+	end
 	if not displayConfig then
 		return
+	end
+	if displayConfig.DynamicDisplayFunc then
+		displayConfig = displayConfig.DynamicDisplayFunc(cmdID, command)
 	end
 	if displayConfig.useAltConfig then
 		return displayConfig.altConfig
@@ -1080,6 +1150,18 @@ end
 --------------------------------------------------------------------------------
 --------------------------------------------------------------------------------
 -- Button Panel
+local iconTypeCache = {}
+local function GetUnitIcon(unitDefID)
+	if unitDefID and iconTypeCache[unitDefID] then
+		return iconTypeCache[unitDefID]
+	end
+	local ud = UnitDefs[unitDefID]
+	if not ud then
+		return
+	end
+	iconTypeCache[unitDefID] = icontypes[ud.iconType].bitmap or ('icons/' .. ud.iconType .. iconFormat)
+	return iconTypeCache[unitDefID]
+end
 
 local function GetButton(parent, name, selectionIndex, x, y, xStr, yStr, width, height, buttonLayout, isStructure, onClick)
 	local cmdID
@@ -1164,10 +1246,11 @@ local function GetButton(parent, name, selectionIndex, x, y, xStr, yStr, width, 
 	end
 	
 	local image
+	local image_icon
 	local buildProgress
 	local textBoxes = {}
 	
-	local function SetImage(texture1, texture2)
+	local function SetImageTexture(texture1, texture2)
 		if not image then
 			image = Image:New {
 				name = name .. "_image",
@@ -1195,6 +1278,45 @@ local function GetButton(parent, name, selectionIndex, x, y, xStr, yStr, width, 
 		image.file = texture1
 		image.file2 = texture2
 		image:Invalidate()
+	end
+	
+	local function ApplyRadarIconTexture(texture1)
+		if not image_icon then
+			image_icon = Image:New {
+				name = name .. "_image_radar_icon",
+				top = 0,
+				right = 0,
+				width=radarIconSize,
+				height=radarIconSize,
+				keepAspect = true,
+				resizable = true,
+				file = texture1,
+				parent = image,
+			}
+			return
+		end
+		image_icon:SetVisibility(true)
+		image_icon.file = texture1
+		image_icon:Resize(radarIconSize, radarIconSize)
+		image_icon:Invalidate()
+	end
+	
+	local function RemoveRadarIconTexture()
+		if image_icon then
+			image_icon:SetVisibility(false)
+		end
+	end
+	
+	local function SetImageFromConfig(displayConfig, command, state)
+		if state and displayConfig then
+			SetImageTexture(displayConfig.texture[state])
+		elseif displayConfig then
+			SetImageTexture(displayConfig.texture or (command and command.texture), displayConfig.tex2)
+		elseif command then
+			SetImageTexture(command.texture)
+		else
+			spEcho("Error, missing command displayConfig and command")
+		end
 	end
 	
 	local function SetText(textPosition, text)
@@ -1229,6 +1351,9 @@ local function GetButton(parent, name, selectionIndex, x, y, xStr, yStr, width, 
 			return
 		end
 		textBoxes[textPosition]:SetVisibility(newVisible)
+		if newVisible then
+			textBoxes[textPosition]:BringToFront()
+		end
 		
 		if (not newVisible) or (text == textBoxes[textPosition].caption) then
 			return
@@ -1249,7 +1374,7 @@ local function GetButton(parent, name, selectionIndex, x, y, xStr, yStr, width, 
 		isDisabled = newDisabled
 		
 		if not image then
-			SetImage("")
+			SetImageTexture("")
 		end
 		if isDisabled then
 			button.backgroundColor = BUTTON_DISABLE_COLOR
@@ -1271,6 +1396,17 @@ local function GetButton(parent, name, selectionIndex, x, y, xStr, yStr, width, 
 		image:Invalidate()
 	end
 	
+	function externalFunctionsAndData.ApplyRadarIcon()
+		local ud = UnitDefs[-cmdID]
+		if ud ~= nil then
+			ApplyRadarIconTexture(GetUnitIcon(ud.id))
+		end
+	end
+	
+	function externalFunctionsAndData.RemoveRadarIcon()
+		RemoveRadarIconTexture()
+	end
+	
 	function externalFunctionsAndData.SetProgressBar(proportion)
 		if buildProgress then
 			buildProgress:SetValue(proportion or 0)
@@ -1278,7 +1414,7 @@ local function GetButton(parent, name, selectionIndex, x, y, xStr, yStr, width, 
 		end
 		
 		if not image then
-			SetImage("")
+			SetImageTexture("")
 		end
 		
 		buildProgress = Progressbar:New{
@@ -1374,7 +1510,7 @@ local function GetButton(parent, name, selectionIndex, x, y, xStr, yStr, width, 
 				for _,textBox in pairs(textBoxes) do
 					textBox:SetCaption(NO_TEXT)
 				end
-				SetImage()
+				SetImageTexture()
 				
 				if not onMouseOverFun then
 					onMouseOverFun = function ()
@@ -1443,21 +1579,19 @@ local function GetButton(parent, name, selectionIndex, x, y, xStr, yStr, width, 
 		
 		if cmdID == newCmdID then
 			if isStateCommand then
-				local displayConfig = GetDisplayConfig(cmdID)
+				local displayConfig = GetDisplayConfig(cmdID, command)
 				if displayConfig then
-					local texture = displayConfig.texture[state]
 					if displayConfig.stateTooltip then
 						button.tooltip = GetButtonTooltip(displayConfig, command, state)
 					end
-					SetImage(texture)
+					SetImageFromConfig(displayConfig, command, state)
 				end
 			elseif newCmdID and DYNAMIC_COMMANDS[newCmdID] then
 				-- Reset potentially stale special weapon iamge and tooltip.
 				-- Action is the same so hotkey does not require a reset.
-				local displayConfig = GetDisplayConfig(cmdID)
+				local displayConfig = GetDisplayConfig(cmdID, command)
 				button.tooltip = GetButtonTooltip(displayConfig, command, state)
-				local texture = (displayConfig and displayConfig.texture) or command.texture
-				SetImage(texture)
+				SetImageFromConfig(displayConfig, command)
 			end
 			if not notGlobal then
 				buttonsByCommand[cmdID] = externalFunctionsAndData
@@ -1494,7 +1628,7 @@ local function GetButton(parent, name, selectionIndex, x, y, xStr, yStr, width, 
 			SetDisabled(command.disabled)
 		end
 		
-		local displayConfig = GetDisplayConfig(cmdID)
+		local displayConfig = GetDisplayConfig(cmdID, command)
 		
 		if isBuild then
 			local ud = UnitDefs[-cmdID]
@@ -1504,7 +1638,7 @@ local function GetButton(parent, name, selectionIndex, x, y, xStr, yStr, width, 
 				local tooltip = (buttonLayout.tooltipPrefix or "") .. ud.name
 				button.tooltip = tooltip
 			end
-			SetImage("#" .. -cmdID, (not buttonLayout.noUnitOutline) and WG.GetBuildIconFrame(UnitDefs[-cmdID]))
+			SetImageTexture("#" .. -cmdID, (not buttonLayout.noUnitOutline) and WG.GetBuildIconFrame(UnitDefs[-cmdID]))
 			if buttonLayout.showCost then
 				local cost = GetUnitCost(false, -cmdID)
 				if cost >= 100000000 then
@@ -1533,15 +1667,13 @@ local function GetButton(parent, name, selectionIndex, x, y, xStr, yStr, width, 
 		
 		if isStateCommand then
 			if displayConfig then
-				local texture = displayConfig.texture[state]
-				SetImage(texture)
+				SetImageFromConfig(displayConfig, command, state)
 			else
 				spEcho("Error, missing command config", cmdID)
 			end
 		else
 			if not isBuild then
-				local texture = (displayConfig and displayConfig.texture) or command.texture
-				SetImage(texture)
+				SetImageFromConfig(displayConfig, command)
 			end
 			-- Remove stockpile progress
 			if not (command and DRAW_NAME_COMMANDS[command.id] and command.name) then
@@ -1584,6 +1716,7 @@ local function GetButtonPanel(parent, name, rows, columns, vertical, generalButt
 	local gridMap, override
 	local gridEnabled = true
 	local gridUpdatedSinceVisible = false
+	local radarIconsEnabled = false
 	
 	local externalFunctions = {}
 	
@@ -1688,6 +1821,20 @@ local function GetButtonPanel(parent, name, rows, columns, vertical, generalButt
 		return
 	end
 	
+	function externalFunctions.UpdateRadarIcons()
+		if options.show_radar_icons.value then
+			radarIconsEnabled = true
+			for i = 1, #buttonList do
+				buttonList[i].ApplyRadarIcon()
+			end
+		elseif radarIconsEnabled then
+			radarIconsEnabled = false
+			for i = 1, #buttonList do
+				buttonList[i].RemoveRadarIcon()
+			end
+		end
+	end
+	
 	function externalFunctions.ApplyGridHotkeys(newGridMap, newOverride, updateNonVisible)
 		gridMap = newGridMap or gridMap
 		override = newOverride or override
@@ -1717,6 +1864,7 @@ local function GetButtonPanel(parent, name, rows, columns, vertical, generalButt
 		for i = 1, #buttonList do
 			buttonList[i].OnVisibleGridKeyUpdate()
 		end
+		externalFunctions.UpdateRadarIcons()
 		gridUpdatedSinceVisible = false
 	end
 	
@@ -1819,9 +1967,9 @@ end
 --------------------------------------------------------------------------------
 -- Tab Panel
 
-local function GetTabButton(panel, contentControl, name, humanName, hotkey, loiterable, OnSelect)
+local function GetTabButton(panel, contentControl, name, humanName, hotkey, loiterable, OnSelect, badgeConfig)
 	local disabled = disabledTabs[name]
-	
+
 	local function DoClick(mouse)
 		if disabled or TabClickFunction(mouse) then
 			return
@@ -1832,7 +1980,7 @@ local function GetTabButton(panel, contentControl, name, humanName, hotkey, loit
 			OnSelect()
 		end
 	end
-	
+
 	local button = Button:New {
 		classname = "button_tab",
 		caption = humanName,
@@ -1846,23 +1994,119 @@ local function GetTabButton(panel, contentControl, name, humanName, hotkey, loit
 		},
 	}
 	button.backgroundColor[4] = 0.4
-	
+
 	if disabled then
 		button.font = WG.GetSpecialFont(14, "integral_grey", {outlineColor = {0, 0, 0, 1}, color = {0.6, 0.6, 0.6, 1}})
 		button.supressButtonReaction = true
 	end
-	
+
 	local hideHotkey = loiterable
-	
+
 	if hotkey and (not hideHotkey) and (not disabled) then
 		button:SetCaption(humanName .. " (" .. GetGreenStr(hotkey) .. ")")
 	end
-	
+
 	local externalFunctionsAndData = {
 		button = button,
 		name = name,
 		DoClick = DoClick,
 	}
+
+	-- Create a badge showing a row of icons after the label (one per active
+	-- missile type). The icon list is supplied each update via UpdateBadgeIcons.
+	if badgeConfig and badgeConfig.iconsWG then
+		local BADGE_ICON_SIZE = 18
+		local BADGE_COUNT_WIDTH = 14
+		local BADGE_ENTRY_WIDTH = BADGE_ICON_SIZE + BADGE_COUNT_WIDTH
+		local badgeIcons = {}
+		local badgeLabels = {}
+		local badgeBars = {}
+		local lastBadgeKey = false
+		local lastBadgeWidth = false
+
+		-- Each entry (icon + count) is parented directly to the button (no
+		-- covering panel) so the tab stays clickable; the row is right-aligned so
+		-- it follows the label.
+		function externalFunctionsAndData.UpdateBadgeIcons(list)
+			list = list or {}
+			local width = button.width or 0
+			local keyParts = {}
+			for i = 1, #list do
+				keyParts[i] = list[i].icon .. ":" .. list[i].count .. ":" .. math.floor((list[i].progress or 0) * 100)
+			end
+			local key = table.concat(keyParts, ",")
+			if key == lastBadgeKey and width == lastBadgeWidth then
+				return
+			end
+			lastBadgeKey = key
+			lastBadgeWidth = width
+
+			local n = #list
+			local startX = width - 2 - n * BADGE_ENTRY_WIDTH
+			local y = math.max(0, ((button.height or BADGE_ICON_SIZE) - BADGE_ICON_SIZE) / 2)
+			for i = 1, math.max(n, #badgeIcons) do
+				if i <= n then
+					local entryX = startX + (i - 1) * BADGE_ENTRY_WIDTH
+					if not badgeIcons[i] then
+						badgeIcons[i] = Image:New {
+							width = BADGE_ICON_SIZE,
+							height = BADGE_ICON_SIZE,
+							file = list[i].icon,
+							parent = button,
+						}
+						-- Build progress bar overlaying the icon (like command buttons).
+						badgeBars[i] = Progressbar:New {
+							x = "5%",
+							y = "5%",
+							right = "5%",
+							bottom = "5%",
+							value = 0,
+							max = 1,
+							caption = false,
+							noFont = true,
+							color           = {0.7, 0.7, 0.4, 0.6},
+							backgroundColor = {1, 1, 1, 0.01},
+							parent = badgeIcons[i],
+							skin = nil,
+							skinName = 'default',
+						}
+						badgeLabels[i] = Label:New {
+							width = BADGE_COUNT_WIDTH,
+							height = BADGE_ICON_SIZE,
+							align = "left",
+							valign = "center",
+							fontSize = 10,
+							parent = button,
+						}
+					end
+					badgeIcons[i].file = list[i].icon
+					badgeIcons[i]:SetPos(entryX, y)
+					badgeIcons[i]:SetVisibility(true)
+					badgeIcons[i]:Invalidate()
+
+					local progress = list[i].progress or 0
+					if progress > 0 then
+						badgeBars[i]:SetValue(progress)
+						badgeBars[i]:SetVisibility(true)
+					else
+						badgeBars[i]:SetVisibility(false)
+					end
+
+					badgeLabels[i]:SetCaption((list[i].count > 0) and tostring(list[i].count) or "")
+					badgeLabels[i]:SetPos(entryX + BADGE_ICON_SIZE, y)
+					badgeLabels[i]:SetVisibility(true)
+					badgeLabels[i]:Invalidate()
+				else
+					if badgeIcons[i] then
+						badgeIcons[i]:SetVisibility(false)
+					end
+					if badgeLabels[i] then
+						badgeLabels[i]:SetVisibility(false)
+					end
+				end
+			end
+		end
+	end
 		
 	function externalFunctionsAndData.IsTabSelected()
 		return contentControl.visible
@@ -1928,11 +2172,14 @@ local function GetTabButton(panel, contentControl, name, humanName, hotkey, loit
 end
 
 local function GetTabPanel(parent, rows, columns)
-	local tabHolder = StackPanel:New{
+	-- Two tab rows: the top row is used by panels flagged topRow (the missiles
+	-- tab), the bottom row by everything else. When only one row has tabs it
+	-- fills the whole tab area; when both are used the menu grows taller.
+	local topHolder = StackPanel:New{
 		x = 0,
-		y = 0,
+		y = "0%",
 		right = 0,
-		bottom = 0,
+		height = "100%",
 		padding = {0, 0, 0, 0},
 		itemMargin  = {0, 1, 0, -1},
 		parent = parent,
@@ -1940,12 +2187,54 @@ local function GetTabPanel(parent, rows, columns)
 		resizeItems = true,
 		orientation = "horizontal",
 	}
-	
+	local bottomHolder = StackPanel:New{
+		x = 0,
+		y = "0%",
+		right = 0,
+		height = "100%",
+		padding = {0, 0, 0, 0},
+		itemMargin  = {0, 1, 0, -1},
+		parent = parent,
+		preserveChildrenOrder = true,
+		resizeItems = true,
+		orientation = "horizontal",
+	}
+
+	local function SetRowGeometry(topActive, bottomActive)
+		local twoRows = topActive and bottomActive
+		if twoRows then
+			topHolder._relativeBounds.top = "0%"
+			topHolder._relativeBounds.height = "50%"
+			bottomHolder._relativeBounds.top = "50%"
+			bottomHolder._relativeBounds.height = "50%"
+		else
+			topHolder._relativeBounds.top = "0%"
+			topHolder._relativeBounds.height = "100%"
+			bottomHolder._relativeBounds.top = "0%"
+			bottomHolder._relativeBounds.height = "100%"
+		end
+		topHolder:UpdateClientArea()
+		bottomHolder:UpdateClientArea()
+
+		-- Grow the window upward by one tab row when both rows are used, keeping
+		-- the window bottom pinned to the screen edge (extend the top upward
+		-- rather than letting the bottom rise). The button area is bottom-anchored
+		-- with a fixed height, so only the tab area changes size.
+		if mainWindow and baseWindowHeight then
+			local newHeight = twoRows and (baseWindowHeight * 8/7) or baseWindowHeight
+			local parentHeight = (mainWindow.parent and mainWindow.parent.height) or (mainWindow.y + mainWindow.height)
+			mainWindow:SetPos(nil, parentHeight - newHeight, nil, newHeight)
+			buildTabHolder:UpdateClientArea()
+			topHolder:UpdateClientArea()
+			bottomHolder:UpdateClientArea()
+		end
+	end
+
 	local currentSelectedIndex
 	local hotkeysActive = true
 	local currentTab
 	local tabList = false
-	
+
 	local externalFunctions = {}
 	
 	function externalFunctions.SwitchToTab(name)
@@ -1970,10 +2259,31 @@ local function GetTabPanel(parent, rows, columns)
 			tabList[currentSelectedIndex].SetSelected(false)
 		end
 		tabList = newTabList
-		tabHolder:ClearChildren()
+		topHolder:ClearChildren()
+		bottomHolder:ClearChildren()
+
+		-- Only use the top row when there are also bottom-row tabs; otherwise the
+		-- top-row (missiles) tab drops down into the single bottom row.
+		local hasBottom = false
+		if showTabs then
+			for i = 1, #tabList do
+				if not tabList[i].topRow then
+					hasBottom = true
+					break
+				end
+			end
+		end
+
+		local topActive, bottomActive = false, false
 		for i = 1, #tabList do
 			if showTabs then
-				tabHolder:AddChild(tabList[i].button)
+				if tabList[i].topRow and hasBottom then
+					topHolder:AddChild(tabList[i].button)
+					topActive = true
+				else
+					bottomHolder:AddChild(tabList[i].button)
+					bottomActive = true
+				end
 				tabList[i].SetHideHotkey(variableHide)
 				tabList[i].SetHotkeyActive(hotkeysActive)
 			end
@@ -1981,6 +2291,7 @@ local function GetTabPanel(parent, rows, columns)
 				tabList[i].DoClick()
 			end
 		end
+		SetRowGeometry(topActive, bottomActive)
 	end
 	
 	function externalFunctions.ClearTabs()
@@ -1988,7 +2299,9 @@ local function GetTabPanel(parent, rows, columns)
 			externalFunctions.SwitchToTab()
 			tabList = false
 			currentSelectedIndex = false
-			tabHolder:ClearChildren()
+			topHolder:ClearChildren()
+			bottomHolder:ClearChildren()
+			SetRowGeometry(false, false)
 		end
 	end
 	
@@ -2121,6 +2434,12 @@ local function ProcessAllCommands(commands, customCommands)
 	local factoryUnitID, factoryUnitDefID, fakeFactory, selectedUnitCount = GetSelectionValues()
 	local unitMobilePanelSize = GetUnitMobilePanelSize(commands, factoryUnitDefID)
 
+	-- Detect an actual selection change (vs a command-only refresh) so that
+	-- selecting a unit while on a global tab (missiles) switches to its default.
+	local selectionSignature = table.concat(spGetSelectedUnits(), ",")
+	local selectionChanged = (selectionSignature ~= lastSelectionSignature)
+	lastSelectionSignature = selectionSignature
+
 	selectionIndex = selectionIndex + 1
 	
 	for i = 1, #commandPanels do
@@ -2182,16 +2501,24 @@ local function ProcessAllCommands(commands, customCommands)
 	end
 	
 	-- Determine which tabs to display and which to select
+	local forceShowTabs = false
 	for i = 1, #commandPanels do
 		local data = commandPanels[i]
 		if data.commandCount ~= 0 then
 			tabsToShow[#tabsToShow + 1] = data.tabButton
+			if data.alwaysShowTab then
+				forceShowTabs = true
+			end
 			data.buttons.ClearOldButtons(selectionIndex)
 			if data.queue then
 				data.queue.ClearOldButtons(selectionIndex)
 			end
 			if (not tabToSelect) and data.tabButton.name == lastTabSelected then
-				tabToSelect = lastTabSelected
+				-- When a unit is (re)selected, do not loiter on a global top-row
+				-- tab (missiles); fall through to the unit's default tab instead.
+				if not (selectionChanged and selectedUnitCount > 0 and data.topRow) then
+					tabToSelect = lastTabSelected
+				end
 			end
 		end
 	end
@@ -2204,15 +2531,28 @@ local function ProcessAllCommands(commands, customCommands)
 	if not tabToSelect then
 		tabToSelect = "orders"
 	end
-	
+
 	if #tabsToShow == 0 then
 		tabPanel.ClearTabs()
 		lastTabSelected = false
 	else
-		tabPanel.SetTabs(tabsToShow, #tabsToShow > 1, not factoryUnitDefID, tabToSelect)
+		-- Fall back to the first shown tab if the intended one is not present
+		-- (e.g. only the missiles tab is available while nothing is selected,
+		-- so the default "orders" tab does not exist to be selected).
+		local tabToSelectPresent = false
+		for i = 1, #tabsToShow do
+			if tabsToShow[i].name == tabToSelect then
+				tabToSelectPresent = true
+				break
+			end
+		end
+		if not tabToSelectPresent then
+			tabToSelect = tabsToShow[1].name
+		end
+		tabPanel.SetTabs(tabsToShow, (#tabsToShow > 1) or forceShowTabs, not factoryUnitDefID, tabToSelect)
 		lastTabSelected = tabToSelect
 	end
-	
+
 	-- Keeps main window for tweak mode.SetIntegralVisibility(visible)
 	SetIntegralVisibility(not (#tabsToShow == 0 and selectedUnitCount == 0))
 end
@@ -2228,10 +2568,17 @@ local function InitializeControls()
 	local screenWidth, screenHeight = spGetViewGeometry()
 	local width = math.max(350, math.min(450, screenWidth*screenHeight*0.0004))
 	local height = math.min(screenHeight/4.5, 200*width/450)  + 8
+	baseWindowHeight = height
+	-- The command-button area is bottom-anchored with a fixed height so it never
+	-- moves when the tab area grows/shrinks for a second tab row. One tab row is
+	-- baseHeight/7, matching the original 100/7% tab strip.
+	buttonAreaHeight = height * 6/7
+
+	UpdateRadarIconSizeString(options.radar_icon_size.value)
 
 	gridKeyMap, gridMap, gridCustomOverrides = GenerateGridKeyMap(options.keyboardType2.value)
-	
-	local mainWindow = Window:New{
+
+	mainWindow = Window:New{
 		name      = 'integralwindow',
 		x         = 0,
 		bottom    = 0,
@@ -2256,33 +2603,33 @@ local function InitializeControls()
 		x = options.leftPadding.value,
 		y = "0%",
 		right = options.rightPadding.value,
-		height = "15%",
+		bottom = buttonAreaHeight,
 		padding = {2, 2, 2, -1},
 		parent = mainWindow,
 	}
-	
+
 	tabPanel = GetTabPanel(buildTabHolder)
-	
+
 	buttonsHolder = Control:New{
 		x = options.leftPadding.value,
-		y = (100/7) .. "%",
-		right = options.rightPadding.value,
 		bottom = 0,
+		right = options.rightPadding.value,
+		height = buttonAreaHeight,
 		padding = {0, 0, 0, 0},
 		parent = mainWindow,
 	}
-	
+
 	background = Panel:New{
 		x = 0,
-		y = "15%",
-		right = 0,
 		bottom = 0,
+		right = 0,
+		height = buttonAreaHeight,
 		draggable = false,
 		resizable = false,
 		noFont = true,
 		padding = {0, 0, 0, 0},
 		backgroundColor = {1, 1, 1, options.background_opacity.value},
-		noClickThrough = true,
+		noClickThrough = not options.allowclickthrough.value,
 		parent = mainWindow,
 	}
 	
@@ -2290,7 +2637,9 @@ local function InitializeControls()
 	
 	local function ReturnToOrders(cmdID)
 		if options.selectionClosesTabOnSelect.value then
-			if commandPanelMap.orders then
+			-- Only return to orders if it is actually present; otherwise (e.g.
+			-- missiles tab with nothing selected) stay on the current tab.
+			if commandPanelMap.orders and commandPanelMap.orders.tabButton.IsTabPresent() then
 				commandPanelMap.orders.tabButton.DoClick()
 			end
 		elseif options.selectionClosesTab.value and cmdID then
@@ -2310,11 +2659,12 @@ local function InitializeControls()
 		}
 		commandHolder:SetVisibility(false)
 		
+		-- Only tabs with their own optionName get a hotkey label. Tabs without one
+		-- (missiles, orders, units_factory) previously borrowed the Units hotkey and
+		-- displayed "(N)", but N is the hold-fire key and never switches to them.
 		local hotkey
 		if data.optionName then
 			hotkey = GetActionHotkey(EPIC_NAME .. data.optionName)
-		else
-			hotkey = GetActionHotkey(EPIC_NAME_UNITS)
 		end
 
 		if data.returnOnClick then
@@ -2345,8 +2695,9 @@ local function InitializeControls()
 			end
 		end
 		
-		data.tabButton = GetTabButton(tabPanel, commandHolder, data.name, data.humanName, hotkey, data.loiterable, OnTabSelect)
-	
+		data.tabButton = GetTabButton(tabPanel, commandHolder, data.name, data.humanName, hotkey, data.loiterable, OnTabSelect, {iconsWG = data.badgeIconsWG})
+		data.tabButton.topRow = data.topRow
+
 		if data.gridHotkeys and ((not data.disableableKeys) or options.unitsHotkeys2.value) then
 			data.buttons.ApplyGridHotkeys(gridMap, (gridCustomOverrides and gridCustomOverrides[data.name]) or {})
 		end
@@ -2509,6 +2860,17 @@ options.fancySkinning.OnChange = UpdateBackgroundSkin
 local externalFunctions = {} -- Appear unused in repo but are used by missions.
 local initialized = false
 
+-- Lets other widgets show a factory-style build progress bar on a command button
+-- (e.g. the missile command center showing stockpile build progress).
+function externalFunctions.SetCommandProgress(cmdID, progress)
+	local button = buttonsByCommand[cmdID]
+	if button then
+		button.SetProgressBar(progress or 0)
+		return true
+	end
+	return false
+end
+
 function externalFunctions.GetCommandButtonPosition(cmdID)
 	if not buttonsByCommand[cmdID] then
 		return
@@ -2550,6 +2912,17 @@ function widget:Update()
 	local _,cmdID = spGetActiveCommand()
 	UpdateButtonSelection(cmdID)
 	UpdateReturnToOrders(cmdID)
+
+	-- Update tab badges. Tab presence/visibility is handled by the
+	-- commandCount + SetTabs machinery, driven by each panel's inclusionFunction.
+	for i = 1, #commandPanels do
+		local panelData = commandPanels[i]
+
+		-- Update badge icons (one per active missile type)
+		if panelData.badgeIconsWG and panelData.tabButton and panelData.tabButton.UpdateBadgeIcons then
+			panelData.tabButton.UpdateBadgeIcons(WG[panelData.badgeIconsWG])
+		end
+	end
 end
 
 function widget:KeyPress(key, modifier, isRepeat)
