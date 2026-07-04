@@ -52,6 +52,8 @@ local spGetUnitDefID       = Spring.GetUnitDefID
 local spGetUnitPosition    = Spring.GetUnitPosition
 local spGetUnitHealth      = Spring.GetUnitHealth
 local spGetUnitIsDead      = Spring.GetUnitIsDead
+local spGetUnitRulesParam  = Spring.GetUnitRulesParam
+local spGetGameFrame       = Spring.GetGameFrame
 local spGetUnitAllyTeam    = Spring.GetUnitAllyTeam
 local spGetUnitNeutral     = Spring.GetUnitNeutral
 local spGetUnitsInCylinder = Spring.GetUnitsInCylinder
@@ -94,7 +96,25 @@ local bomberDefList = {
 local myTeam    = Spring.GetMyTeamID()
 local myAllyTeam = Spring.GetMyAllyTeamID()
 
--- cmdData[cmdID] = { defID, splash, damage, attackCmdID }
+-- The set of target categories the bomber's aiming weapon (weapon 1, as ZK's
+-- bomber targeting uses) can engage. nil means no restriction.
+local function BuildTargetCats(ud)
+	local weapon = ud.weapons and ud.weapons[1]
+	local onlyTargets = weapon and weapon.onlyTargets
+	if not onlyTargets then
+		return nil
+	end
+	local cats, any = {}, false
+	for name, allowed in pairs(onlyTargets) do
+		if allowed then
+			cats[name] = true
+			any = true
+		end
+	end
+	return any and cats or nil
+end
+
+-- cmdData[cmdID] = { defID, splash, damage, attackCmdID, targetGround, maxTargetSpeed, targetCats }
 local cmdData = {}
 local watchedDefs = {} -- unitDefID -> true (all bomber types we care about)
 
@@ -108,6 +128,7 @@ for _, entry in ipairs(bomberDefList) do
 			attackCmdID    = entry.manualFire and CMD_AIR_MANUAL_FIRE or CMD_ATTACK,
 			targetGround   = entry.targetGround,
 			maxTargetSpeed = entry.maxTargetSpeed,
+			targetCats     = BuildTargetCats(ud),
 		}
 		watchedDefs[ud.id] = true
 	end
@@ -142,6 +163,10 @@ end
 --------------------------------------------------------------------------------
 local owned = {}       -- unitID -> unitDefID
 local ownedCount = {}  -- unitDefID -> count
+
+-- A bomber that has been sent on a run stays committed until it rearms.
+local REASSIGN_LOCK_FRAMES = 150 -- ~5s; bridges the gap before noammo updates
+local assignLock = {}            -- unitID -> game frame until which it stays committed
 
 local function AddOwned(unitID, unitDefID, unitTeam)
 	if unitTeam == myTeam and watchedDefs[unitDefID] and not owned[unitID] then
@@ -185,6 +210,7 @@ end
 
 function widget:UnitDestroyed(unitID)
 	RemoveOwned(unitID)
+	assignLock[unitID] = nil
 end
 
 --------------------------------------------------------------------------------
@@ -259,15 +285,39 @@ local function TargetTooFast(unitID, maxTargetSpeed)
 	return speed > maxTargetSpeed
 end
 
+-- True if the bomber's weapon cannot engage this target's categories.
+-- Unknown radar targets and unrestricted weapons always pass.
+local function CannotTarget(unitID, targetCats)
+	if not targetCats then
+		return false
+	end
+	local unitDefID = spGetUnitDefID(unitID)
+	if not unitDefID then
+		return false
+	end
+	local springCats = UnitDefs[unitDefID] and UnitDefs[unitDefID].springCategories
+	if not springCats then
+		return false
+	end
+	for name in pairs(targetCats) do
+		if springCats[name] then
+			return false
+		end
+	end
+	return true
+end
+
 -- Enemy (non-neutral) units inside the circle, as {id, x, z}, nearest-first.
--- maxTargetSpeed (when set) drops targets too fast for this bomber to hit.
-local function GatherTargets(cx, cz, radius, maxTargetSpeed)
+-- maxTargetSpeed drops targets too fast to hit; targetCats drops targets the
+-- bomber's weapon cannot engage (e.g. enemy aircraft for ground bombers).
+local function GatherTargets(cx, cz, radius, maxTargetSpeed, targetCats)
 	local raw = spGetUnitsInCylinder(cx, cz, radius)
 	local targets = {}
 	for i = 1, #raw do
 		local unitID = raw[i]
 		if spGetUnitAllyTeam(unitID) ~= myAllyTeam and not spGetUnitNeutral(unitID)
-				and not TargetTooFast(unitID, maxTargetSpeed) then
+				and not TargetTooFast(unitID, maxTargetSpeed)
+				and not CannotTarget(unitID, targetCats) then
 			local ux, _, uz = spGetUnitPosition(unitID)
 			if ux then
 				local dx, dz = ux - cx, uz - cz
@@ -284,11 +334,26 @@ local function ActiveMaxSpeed(data)
 	return options.avoidFastTargets.value and data.maxTargetSpeed or nil
 end
 
--- Fully-built, living bombers of this type, plus the set that is selected.
+-- A bomber that has been sent on a run is unavailable until it has rearmed.
+-- noammo ~= 0 means it is out of ammo / refuelling / repairing. assignLock
+-- (declared above) bridges the gap between being ordered and actually dropping.
+local function IsAvailable(unitID)
+	if (spGetUnitRulesParam(unitID, "noammo") or 0) ~= 0 then
+		return false
+	end
+	local lock = assignLock[unitID]
+	if lock and spGetGameFrame() < lock then
+		return false
+	end
+	return true
+end
+
+-- Fully-built, living, rearmed bombers of this type, plus the selected set.
 local function GatherBombers(defID)
 	local pool = {}
 	for unitID, unitDefID in pairs(owned) do
-		if unitDefID == defID and not spGetUnitIsDead(unitID) and IsFullyBuilt(unitID) then
+		if unitDefID == defID and not spGetUnitIsDead(unitID) and IsFullyBuilt(unitID)
+				and IsAvailable(unitID) then
 			pool[#pool + 1] = unitID
 		end
 	end
@@ -342,7 +407,7 @@ local function Dispatch(cmdID, cx, cz, radius, shift)
 		return
 	end
 
-	local targets = GatherTargets(cx, cz, radius, ActiveMaxSpeed(data))
+	local targets = GatherTargets(cx, cz, radius, ActiveMaxSpeed(data), data.targetCats)
 	if #targets == 0 then
 		return
 	end
@@ -354,6 +419,7 @@ local function Dispatch(cmdID, cx, cz, radius, shift)
 	local assigned = {}
 	local opt = shift and CMD_OPT_SHIFT or 0
 	local attackCmdID = data.attackCmdID
+	local lockUntil = spGetGameFrame() + REASSIGN_LOCK_FRAMES
 
 	-- Ground-targeting commands (Odin's shield dgun) fire at the target's
 	-- position; the rest attack the unit directly.
@@ -362,6 +428,11 @@ local function Dispatch(cmdID, cx, cz, radius, shift)
 			return {t.x, max(0, spGetGroundHeight(t.x, t.z)), t.z}
 		end
 		return {t.id}
+	end
+
+	local function Fire(bomber, t)
+		spGiveOrderToUnit(bomber, attackCmdID, OrderAt(t), opt)
+		assignLock[bomber] = lockUntil
 	end
 
 	if data.splash then
@@ -373,7 +444,7 @@ local function Dispatch(cmdID, cx, cz, radius, shift)
 			if not bomber then
 				break
 			end
-			spGiveOrderToUnit(bomber, attackCmdID, OrderAt(t), opt)
+			Fire(bomber, t)
 		end
 	else
 		-- Focus fire: commit enough bombers to kill each target before moving on.
@@ -387,7 +458,7 @@ local function Dispatch(cmdID, cx, cz, radius, shift)
 					exhausted = true
 					break
 				end
-				spGiveOrderToUnit(bomber, attackCmdID, OrderAt(t), opt)
+				Fire(bomber, t)
 			end
 			if exhausted then
 				break
@@ -493,7 +564,8 @@ function widget:DrawWorld()
 
 	-- Mark the enemy targets that would actually be engaged.
 	local data = cmdData[activeCmd]
-	local targets = GatherTargets(centerX, centerZ, radius, data and ActiveMaxSpeed(data) or nil)
+	local targets = GatherTargets(centerX, centerZ, radius,
+		data and ActiveMaxSpeed(data) or nil, data and data.targetCats or nil)
 	gl.Color(1.0, 0.8, 0.2, 0.7)
 	for i = 1, #targets do
 		local t = targets[i]
