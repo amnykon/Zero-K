@@ -70,12 +70,14 @@ local CLICK_THRESHOLD   = 20     -- drag shorter than this (elmos) counts as a c
 local CHECK_INTERVAL    = 3      -- frames between sprint-range checks
 local RETURN_DISTANCE_SQ = 250 * 250 -- how close to a pad counts as "back"
 
--- Repair pads / air factories a Swift retreats toward after its run.
-local PAD_DEFS = {}
-for _, name in ipairs({"staticrearm", "factoryplane", "plateplane"}) do
-	local ud = UnitDefNames[name]
-	if ud then
-		PAD_DEFS[ud.id] = true
+local PAD_REFRESH = 15 -- frames between rebuilds of the retreat-target cache
+
+-- Somewhere safe to recharge after a run: any allied factory, plus airpads.
+local retreatDefs = {}
+for id = 1, #UnitDefs do
+	local ud = UnitDefs[id]
+	if ud and (ud.isFactory or ud.name == "staticrearm") then
+		retreatDefs[id] = true
 	end
 end
 
@@ -87,6 +89,7 @@ local CMD_SCOUT_SWIFT   = 10286
 -- Per-type data, derived from unit defs
 --------------------------------------------------------------------------------
 local myTeam = Spring.GetMyTeamID()
+local myAllyTeam = Spring.GetMyAllyTeamID()
 
 -- unitData[unitDefID] = { cmdID, los, sprintRangeSq }
 local unitData = {}
@@ -158,23 +161,15 @@ local scoutCommands = {
 -- Ownership tracking: a scout command is offered whenever the player owns at
 -- least one unit of that type, regardless of the current selection. The command
 -- can then dispatch unselected scouts (selected ones are merely prioritised).
-local owned = {}       -- unitID -> unitDefID (our types, on my team)
+local owned = {}       -- unitID -> unitDefID (our scout types, on my team)
 local ownedCount = {}  -- unitDefID -> count
-local repairPads = {}  -- unitID -> {x, y, z} of my repair pads / air factories
-local returning = {}   -- unitID -> true while a Swift is flying back to a pad
+local returning = {}   -- unitID -> true while a Swift is flying back to safety
+local retreatPads = {} -- cached list of allied factory / airpad positions {x, y, z}
 
 local function AddOwned(unitID, unitDefID, unitTeam)
-	if unitTeam ~= myTeam then
-		return
-	end
-	if unitData[unitDefID] and not owned[unitID] then
+	if unitTeam == myTeam and unitData[unitDefID] and not owned[unitID] then
 		owned[unitID] = unitDefID
 		ownedCount[unitDefID] = (ownedCount[unitDefID] or 0) + 1
-	elseif PAD_DEFS[unitDefID] and not repairPads[unitID] then
-		local x, y, z = spGetUnitPosition(unitID)
-		if x then
-			repairPads[unitID] = {x, y, z}
-		end
 	end
 end
 
@@ -184,14 +179,12 @@ local function RemoveOwned(unitID)
 		ownedCount[unitDefID] = ownedCount[unitDefID] - 1
 		owned[unitID] = nil
 	end
-	repairPads[unitID] = nil
 	returning[unitID] = nil
 end
 
 local function RescanOwned()
 	owned = {}
 	ownedCount = {}
-	repairPads = {}
 	returning = {}
 	local teamUnits = spGetTeamUnits(myTeam)
 	for i = 1, #teamUnits do
@@ -199,10 +192,29 @@ local function RescanOwned()
 	end
 end
 
--- Nearest repair pad to a position, with its squared distance.
+-- Rebuild the cache of allied retreat targets (any allied factory, plus airpads).
+local function RebuildRetreatPads()
+	retreatPads = {}
+	local allyTeams = Spring.GetTeamList(myAllyTeam) or {}
+	for a = 1, #allyTeams do
+		local units = spGetTeamUnits(allyTeams[a])
+		for i = 1, #units do
+			local defID = spGetUnitDefID(units[i])
+			if defID and retreatDefs[defID] then
+				local x, y, z = spGetUnitPosition(units[i])
+				if x then
+					retreatPads[#retreatPads + 1] = {x, y, z}
+				end
+			end
+		end
+	end
+end
+
+-- Nearest retreat target to a position, with its squared distance.
 local function NearestPad(x, z)
 	local best, bestDistSq
-	for _, pos in pairs(repairPads) do
+	for i = 1, #retreatPads do
+		local pos = retreatPads[i]
 		local dx, dz = pos[1] - x, pos[3] - z
 		local distSq = dx*dx + dz*dz
 		if not best or distSq < bestDistSq then
@@ -545,6 +557,9 @@ function widget:GameFrame(frame)
 	if frame % CHECK_INTERVAL ~= 0 then
 		return
 	end
+	if frame % PAD_REFRESH == 0 then
+		RebuildRetreatPads()
+	end
 	for unitID, info in pairs(tracked) do
 		if (not spValidUnitID(unitID)) or spGetUnitIsDead(unitID) then
 			tracked[unitID] = nil
@@ -648,7 +663,9 @@ end
 
 function widget:PlayerChanged()
 	myTeam = Spring.GetMyTeamID()
+	myAllyTeam = Spring.GetMyAllyTeamID()
 	RescanOwned()
+	RebuildRetreatPads()
 	RemoveIfSpectator()
 end
 
@@ -659,5 +676,6 @@ function widget:Initialize()
 		return
 	end
 	RescanOwned()
+	RebuildRetreatPads()
 	RemoveIfSpectator()
 end
