@@ -15,8 +15,14 @@ end
 -- Configuration
 --------------------------------------------------------------------------------
 options_path = 'Settings/Interface/Bomber Attack Order'
-options_order = { 'minRadius', 'drawCircle' }
+options_order = { 'avoidFastTargets', 'minRadius', 'drawCircle' }
 options = {
+	avoidFastTargets = {
+		name = 'Avoid fast targets',
+		desc = 'Bombers with slow bombs skip targets too fast to reliably hit (they can dodge the bomb before it lands). Odin restricts to buildings.',
+		type = 'bool',
+		value = true,
+	},
 	minRadius = {
 		name = 'Minimum circle radius',
 		desc = 'A click (or a very short drag) attacks targets within at least this radius.',
@@ -65,16 +71,24 @@ local CMD_AIR_MANUAL_FIRE = CMD_AIR_MANUALFIRE -- from customcmds.h.lua
 --------------------------------------------------------------------------------
 -- splash bombers spread one strike per target; precision (non-splash) bombers
 -- pile enough strikes on each target to kill it. damage is per bomber strike and
--- is only used by the precision path. Odin appears twice: its bombs and its
--- shield dgun (CMD_AIR_MANUALFIRE on weapon 3).
+-- is only used by the precision path.
+--
+-- maxTargetSpeed (elmos/s) is the fastest unit the bomber can reliably hit,
+-- enforced only when the "avoid fast targets" option is on. It reflects bomb
+-- flight time vs. the target's speed: slow unguided bombs get a low cap, homing
+-- or near-instant weapons a high one, and Odin's very slow zeppelin bomb is
+-- pinned to buildings only (0). nil means no limit.
+--
+-- Odin appears twice: its bombs (precision, buildings only) and its shield dgun,
+-- which is splash and fired at the ground (CMD_AIR_MANUALFIRE on weapon 3).
 local bomberDefList = {
-	{cmdID = 10287, unitName = "bomberriot",    splash = true,  damage = 0,    manualFire = false}, -- Phoenix
-	{cmdID = 10288, unitName = "bomberheavy",   splash = true,  damage = 2000, manualFire = false}, -- Likho
-	{cmdID = 10289, unitName = "bomberdisarm",  splash = true,  damage = 0,    manualFire = false}, -- Thunderbird
-	{cmdID = 10290, unitName = "bomberassault", splash = true,  damage = 2500, manualFire = false}, -- Odin bombs
-	{cmdID = 10291, unitName = "bomberassault", splash = true,  damage = 0,    manualFire = true},  -- Odin shield dgun
-	{cmdID = 10292, unitName = "bomberstrike",  splash = false, damage = 180,  manualFire = false}, -- Magpie
-	{cmdID = 10293, unitName = "bomberprec",    splash = false, damage = 800,  manualFire = false}, -- Raven
+	{cmdID = 10287, unitName = "bomberriot",    splash = true,  damage = 0,    manualFire = false, targetGround = false, maxTargetSpeed = 75},  -- Phoenix (napalm)
+	{cmdID = 10288, unitName = "bomberheavy",   splash = true,  damage = 2000, manualFire = false, targetGround = false, maxTargetSpeed = 150}, -- Likho (homing)
+	{cmdID = 10289, unitName = "bomberdisarm",  splash = true,  damage = 0,    manualFire = false, targetGround = false, maxTargetSpeed = 150}, -- Thunderbird (beam)
+	{cmdID = 10290, unitName = "bomberassault", splash = false, damage = 2500, manualFire = false, targetGround = false, maxTargetSpeed = 0},   -- Odin bombs (buildings only)
+	{cmdID = 10291, unitName = "bomberassault", splash = true,  damage = 0,    manualFire = true,  targetGround = true,  maxTargetSpeed = nil}, -- Odin shield dgun
+	{cmdID = 10292, unitName = "bomberstrike",  splash = false, damage = 180,  manualFire = false, targetGround = false, maxTargetSpeed = 150}, -- Magpie (homing)
+	{cmdID = 10293, unitName = "bomberprec",    splash = false, damage = 800,  manualFire = false, targetGround = false, maxTargetSpeed = 90},  -- Raven (precision)
 }
 
 local myTeam    = Spring.GetMyTeamID()
@@ -88,10 +102,12 @@ for _, entry in ipairs(bomberDefList) do
 	local ud = UnitDefNames[entry.unitName]
 	if ud then
 		cmdData[entry.cmdID] = {
-			defID       = ud.id,
-			splash      = entry.splash,
-			damage      = entry.damage,
-			attackCmdID = entry.manualFire and CMD_AIR_MANUAL_FIRE or CMD_ATTACK,
+			defID          = ud.id,
+			splash         = entry.splash,
+			damage         = entry.damage,
+			attackCmdID    = entry.manualFire and CMD_AIR_MANUAL_FIRE or CMD_ATTACK,
+			targetGround   = entry.targetGround,
+			maxTargetSpeed = entry.maxTargetSpeed,
 		}
 		watchedDefs[ud.id] = true
 	end
@@ -228,13 +244,30 @@ local function IsFullyBuilt(unitID)
 	return buildProgress and buildProgress >= 1
 end
 
+-- True if the target moves too fast for this bomber's bombs to land on it.
+-- Buildings (speed 0) always pass; radar-only targets of unknown type are kept.
+local function TargetTooFast(unitID, maxTargetSpeed)
+	if not maxTargetSpeed then
+		return false
+	end
+	local unitDefID = spGetUnitDefID(unitID)
+	if not unitDefID then
+		return false
+	end
+	local ud = UnitDefs[unitDefID]
+	local speed = (ud and ud.speed) or 0
+	return speed > maxTargetSpeed
+end
+
 -- Enemy (non-neutral) units inside the circle, as {id, x, z}, nearest-first.
-local function GatherTargets(cx, cz, radius)
+-- maxTargetSpeed (when set) drops targets too fast for this bomber to hit.
+local function GatherTargets(cx, cz, radius, maxTargetSpeed)
 	local raw = spGetUnitsInCylinder(cx, cz, radius)
 	local targets = {}
 	for i = 1, #raw do
 		local unitID = raw[i]
-		if spGetUnitAllyTeam(unitID) ~= myAllyTeam and not spGetUnitNeutral(unitID) then
+		if spGetUnitAllyTeam(unitID) ~= myAllyTeam and not spGetUnitNeutral(unitID)
+				and not TargetTooFast(unitID, maxTargetSpeed) then
 			local ux, _, uz = spGetUnitPosition(unitID)
 			if ux then
 				local dx, dz = ux - cx, uz - cz
@@ -244,6 +277,11 @@ local function GatherTargets(cx, cz, radius)
 	end
 	table.sort(targets, function(a, b) return a.distSq < b.distSq end)
 	return targets
+end
+
+-- The speed cap in force for a command right now (nil when the option is off).
+local function ActiveMaxSpeed(data)
+	return options.avoidFastTargets.value and data.maxTargetSpeed or nil
 end
 
 -- Fully-built, living bombers of this type, plus the set that is selected.
@@ -304,7 +342,7 @@ local function Dispatch(cmdID, cx, cz, radius, shift)
 		return
 	end
 
-	local targets = GatherTargets(cx, cz, radius)
+	local targets = GatherTargets(cx, cz, radius, ActiveMaxSpeed(data))
 	if #targets == 0 then
 		return
 	end
@@ -317,6 +355,15 @@ local function Dispatch(cmdID, cx, cz, radius, shift)
 	local opt = shift and CMD_OPT_SHIFT or 0
 	local attackCmdID = data.attackCmdID
 
+	-- Ground-targeting commands (Odin's shield dgun) fire at the target's
+	-- position; the rest attack the unit directly.
+	local function OrderAt(t)
+		if data.targetGround then
+			return {t.x, max(0, spGetGroundHeight(t.x, t.z)), t.z}
+		end
+		return {t.id}
+	end
+
 	if data.splash then
 		-- One strike per target, spread across the circle, using the nearest
 		-- bomber for each, until targets or bombers run out.
@@ -326,7 +373,7 @@ local function Dispatch(cmdID, cx, cz, radius, shift)
 			if not bomber then
 				break
 			end
-			spGiveOrderToUnit(bomber, attackCmdID, {t.id}, opt)
+			spGiveOrderToUnit(bomber, attackCmdID, OrderAt(t), opt)
 		end
 	else
 		-- Focus fire: commit enough bombers to kill each target before moving on.
@@ -340,7 +387,7 @@ local function Dispatch(cmdID, cx, cz, radius, shift)
 					exhausted = true
 					break
 				end
-				spGiveOrderToUnit(bomber, attackCmdID, {t.id}, opt)
+				spGiveOrderToUnit(bomber, attackCmdID, OrderAt(t), opt)
 			end
 			if exhausted then
 				break
@@ -444,8 +491,9 @@ function widget:DrawWorld()
 	gl.Color(1.0, 0.3, 0.2, 0.85)
 	gl.DrawGroundCircle(centerX, centerY, centerZ, radius, 48)
 
-	-- Mark covered enemy targets.
-	local targets = GatherTargets(centerX, centerZ, radius)
+	-- Mark the enemy targets that would actually be engaged.
+	local data = cmdData[activeCmd]
+	local targets = GatherTargets(centerX, centerZ, radius, data and ActiveMaxSpeed(data) or nil)
 	gl.Color(1.0, 0.8, 0.2, 0.7)
 	for i = 1, #targets do
 		local t = targets[i]

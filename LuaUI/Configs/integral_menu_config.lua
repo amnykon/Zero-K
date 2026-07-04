@@ -47,8 +47,8 @@ local bomberCmds = {
 	{id = 10287, name = "Phoenix Run", icon = "bomberriot", col = 1, row = 1, tooltip = "Phoenix Napalm Run\nDrag a circle; Phoenixes spread saturation napalm across the targets."},
 	{id = 10288, name = "Likho Run", icon = "bomberheavy", col = 2, row = 1, tooltip = "Likho Run\nDrag a circle; Likhos spread singularity bombs across the targets."},
 	{id = 10289, name = "Thunderbird Run", icon = "bomberdisarm", col = 3, row = 1, tooltip = "Thunderbird Run\nDrag a circle; Thunderbirds spread disarm strikes across the targets."},
-	{id = 10290, name = "Odin Run", icon = "bomberassault", col = 4, row = 1, tooltip = "Odin Assault Run\nDrag a circle; Odins spread their bombs across the targets."},
-	{id = 10291, name = "Odin Shield", icon = "bomberassault", texture = imageDir .. 'Bold/dgun.png', col = 5, row = 1, tooltip = "Odin Shield Run\nDrag a circle; Odins deploy their shield dgun over the targets."},
+	{id = 10290, name = "Odin Run", icon = "bomberassault", col = 4, row = 1, tooltip = "Odin Assault Run\nDrag a circle; Odins focus enough bombs to destroy each building before moving on (buildings only)."},
+	{id = 10291, name = "Odin Shield", icon = "bomberassault", texture = imageDir .. 'Bold/dgun.png', col = 5, row = 1, tooltip = "Odin Shield Run\nDrag a circle; Odins deploy their shield dgun on the ground, spread across the area."},
 	{id = 10292, name = "Magpie Run", icon = "bomberstrike", col = 1, row = 2, tooltip = "Magpie Strike\nDrag a circle; Magpies focus-fire each target with enough strikes to kill it before moving on."},
 	{id = 10293, name = "Raven Run", icon = "bomberprec", col = 2, row = 2, tooltip = "Raven Precision Strike\nDrag a circle; Ravens focus-fire each target with enough bombs to kill it before moving on."},
 }
