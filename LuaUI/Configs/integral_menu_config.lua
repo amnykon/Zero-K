@@ -22,6 +22,23 @@ local function isMissileCommand(cmdID)
 	return missileCmdPos[cmdID] ~= nil
 end
 
+-- Air scout run commands (see cmd_air_scout_order.lua). Like the missile
+-- launch commands, these live in their own tab that is independent of the
+-- current selection.
+local scoutCmds = {
+	{id = 10286, name = "Swift Run", icon = "planefighter", col = 1, row = 1, tooltip = "Swift Scout Run\nClick or drag a line to scatter Swifts. Each speed-boosts to reach its point."},
+	{id = 10285, name = "Sparrow Run", icon = "planelightscout", col = 2, row = 1, tooltip = "Sparrow Scout Run\nClick or drag a line to scatter Sparrows. Each detonates on arrival for a reveal ping."},
+}
+
+local scoutCmdPos = {}
+for _, scout in ipairs(scoutCmds) do
+	scoutCmdPos[scout.id] = {col = scout.col, row = scout.row}
+end
+
+local function isScoutCommand(cmdID)
+	return scoutCmdPos[cmdID] ~= nil
+end
+
 --------------------------------------------------------------------------------
 --------------------------------------------------------------------------------
 -- Tooltips
@@ -515,6 +532,16 @@ for _, missile in ipairs(missileCmds) do
 	}
 end
 
+for _, scout in ipairs(scoutCmds) do
+	local unitDef = UnitDefNames[scout.icon]
+	local icon = unitDef and ("#" .. unitDef.id) or (imageDir .. 'Bold/attack.png')
+	commandDisplayConfig[scout.id] = {
+		texture = icon,
+		tooltip = scout.tooltip,
+		drawName = true, -- show the available scout count (set by the widget)
+	}
+end
+
 local function hasMissileUnits()
 	local teamUnits = Spring.GetTeamUnits(Spring.GetMyTeamID()) or {}
 	local missileUnitNames = {
@@ -540,6 +567,20 @@ local function hasMissileUnits()
 	return false
 end
 
+local function hasScoutUnits()
+	local teamUnits = Spring.GetTeamUnits(Spring.GetMyTeamID()) or {}
+	for _, unitID in ipairs(teamUnits) do
+		local unitDefID = Spring.GetUnitDefID(unitID)
+		if unitDefID then
+			local unitDef = UnitDefs[unitDefID]
+			if unitDef and (unitDef.name == "planefighter" or unitDef.name == "planelightscout") then
+				return true
+			end
+		end
+	end
+	return false
+end
+
 local commandPanels = {
 	{
 		humanName = "Launch",
@@ -558,6 +599,22 @@ local commandPanels = {
 		returnOnClick = "orders",
 	},
 	{
+		humanName = "Scouts",
+		name = "airscouts",
+		inclusionFunction = function(cmdID)
+			if not hasScoutUnits() then return false end
+			local pos = scoutCmdPos[cmdID]
+			return pos ~= nil, pos
+		end,
+		loiterable = true,
+		alwaysShowTab = true,
+		topRow = true,
+		buttonLayoutConfig = buttonLayoutConfig.command,
+		badgeIconsWG = "airScoutActiveIcons",
+		gridHotkeys = true,
+		returnOnClick = "orders",
+	},
+	{
 		humanName = "Orders",
 		name = "orders",
 		inclusionFunction = function(cmdID, factoryUnitDefID, forceOrdersCommand, unitMobilePanelSize)
@@ -565,7 +622,7 @@ local commandPanels = {
 				not buildCmdEconomy[cmdID] and not buildCmdFactory[cmdID] and
 				not buildCmdSpecial[cmdID] and not buildCmdDefence[cmdID] and
 				not plateCommandID[cmdID] and
-				not isMissileCommand(cmdID))
+				not isMissileCommand(cmdID) and not isScoutCommand(cmdID))
 		end,
 		loiterable = true,
 		buttonLayoutConfig = buttonLayoutConfig.command,

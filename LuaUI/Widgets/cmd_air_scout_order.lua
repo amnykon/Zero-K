@@ -64,12 +64,6 @@ local CMD_OPT_SHIFT      = CMD.OPT_SHIFT
 local CMD_OPT_INTERNAL   = CMD.OPT_INTERNAL
 local CMD_ONECLICK       = Spring.Utilities.CMD.ONECLICK_WEAPON
 
--- Command-menu ordering anchors (see cmd_ferry_points.lua / cmd_newton_firezone.lua).
-local CMD_REPEAT     = CMD.REPEAT
-local CMD_MOVE_STATE = CMD.MOVE_STATE
-local CMD_FIRE_STATE = CMD.FIRE_STATE
-local CMD_RETREAT    = Spring.Utilities.CMD.RETREAT
-
 local FRAMES_PER_SECOND = 30
 local CLICK_THRESHOLD   = 20    -- drag shorter than this (elmos) counts as a click
 local CHECK_INTERVAL    = 3     -- frames between sprint-range checks
@@ -113,26 +107,38 @@ BuildTypeData("planefighter",    CMD_SCOUT_SWIFT)   -- Swift
 --------------------------------------------------------------------------------
 -- Command descriptors
 --------------------------------------------------------------------------------
+-- Placement in the "Scouts" tab, the icon and the tooltip come from
+-- commandDisplayConfig in integral_menu_config.lua. The name field carries the
+-- available-scout count (drawn by the menu because drawName is set there) and is
+-- refreshed in widget:Update.
 local cmdSparrow = {
-	id      = CMD_SCOUT_SPARROW,
-	type    = CMDTYPE.ICON_MAP,
-	tooltip = 'Sparrow Scout Run: click or drag a line to scatter Sparrows. Each detonates on arrival for a reveal ping.',
-	cursor  = 'Attack',
-	action  = 'airscoutsparrow',
-	params  = { },
-	texture = 'LuaUI/Images/commands/Bold/detonate.png',
-	pos     = {CMD_REPEAT, CMD_MOVE_STATE, CMD_FIRE_STATE, CMD_RETREAT},
+	id       = CMD_SCOUT_SPARROW,
+	type     = CMDTYPE.ICON_MAP,
+	name     = "",
+	tooltip  = 'Sparrow Scout Run: click or drag a line to scatter Sparrows. Each detonates on arrival for a reveal ping.',
+	cursor   = 'Attack',
+	action   = 'airscoutsparrow',
+	texture  = 'LuaUI/Images/commands/Bold/detonate.png',
+	disabled = false,
+	params   = { },
 }
 
 local cmdSwift = {
-	id      = CMD_SCOUT_SWIFT,
-	type    = CMDTYPE.ICON_MAP,
-	tooltip = 'Swift Scout Run: click or drag a line to scatter Swifts. Each speed-boosts to reach its point.',
-	cursor  = 'Move',
-	action  = 'airscoutswift',
-	params  = { },
-	texture = 'LuaUI/Images/commands/Bold/sprint.png',
-	pos     = {CMD_REPEAT, CMD_MOVE_STATE, CMD_FIRE_STATE, CMD_RETREAT},
+	id       = CMD_SCOUT_SWIFT,
+	type     = CMDTYPE.ICON_MAP,
+	name     = "",
+	tooltip  = 'Swift Scout Run: click or drag a line to scatter Swifts. Each speed-boosts to reach its point.',
+	cursor   = 'Move',
+	action   = 'airscoutswift',
+	texture  = 'LuaUI/Images/commands/Bold/sprint.png',
+	disabled = false,
+	params   = { },
+}
+
+-- Stable order matching the tab column layout (Swift col 1, Sparrow col 2).
+local scoutCommands = {
+	{cmdID = CMD_SCOUT_SWIFT,   desc = cmdSwift,   defID = cmdToDef[CMD_SCOUT_SWIFT]},
+	{cmdID = CMD_SCOUT_SPARROW, desc = cmdSparrow, defID = cmdToDef[CMD_SCOUT_SPARROW]},
 }
 
 -- Ownership tracking: a scout command is offered whenever the player owns at
@@ -167,12 +173,52 @@ end
 
 function widget:CommandsChanged()
 	local customCommands = widgetHandler.customCommands
-	if (ownedCount[cmdToDef[CMD_SCOUT_SPARROW]] or 0) > 0 then
-		customCommands[#customCommands + 1] = cmdSparrow
+	for i = 1, #scoutCommands do
+		local sc = scoutCommands[i]
+		if (ownedCount[sc.defID] or 0) > 0 then
+			customCommands[#customCommands + 1] = sc.desc
+		end
 	end
-	if (ownedCount[cmdToDef[CMD_SCOUT_SWIFT]] or 0) > 0 then
-		customCommands[#customCommands + 1] = cmdSwift
+end
+
+-- Refresh the tab's per-button count badge and keep it visible while nothing is
+-- selected. Mirrors missile_command_center.lua: the integral menu only re-reads
+-- custom commands on CommandsChanged, which the menu pipeline does not run on its
+-- own with an empty selection, so a layout update is forced when needed.
+local UPDATE_FREQUENCY = 0.25
+local updateTimer = UPDATE_FREQUENCY + 1
+local wasEmptySelection = false
+
+function widget:Update(dt)
+	updateTimer = updateTimer + dt
+	if updateTimer < UPDATE_FREQUENCY then
+		return
 	end
+	updateTimer = 0
+
+	local changed = false
+	local activeIcons = {}
+	for i = 1, #scoutCommands do
+		local sc = scoutCommands[i]
+		local count = ownedCount[sc.defID] or 0
+		local displayName = (count > 0) and ("x" .. count) or ""
+		local disabled = (count == 0)
+		if sc.desc.name ~= displayName or sc.desc.disabled ~= disabled then
+			sc.desc.name = displayName
+			sc.desc.disabled = disabled
+			changed = true
+		end
+		if count > 0 then
+			activeIcons[#activeIcons + 1] = {icon = "#" .. sc.defID, count = count, progress = 0}
+		end
+	end
+	WG.airScoutActiveIcons = activeIcons
+
+	local emptySelection = (Spring.GetSelectedUnitsCount() == 0)
+	if changed or (emptySelection and not wasEmptySelection) then
+		Spring.ForceLayoutUpdate()
+	end
+	wasEmptySelection = emptySelection
 end
 
 --------------------------------------------------------------------------------
