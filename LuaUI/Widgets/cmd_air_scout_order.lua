@@ -135,31 +135,42 @@ local cmdSwift = {
 	pos     = {CMD_REPEAT, CMD_MOVE_STATE, CMD_FIRE_STATE, CMD_RETREAT},
 }
 
--- Which of our commands should be offered, based on the current selection.
-local showSparrow = false
-local showSwift   = false
+-- Ownership tracking: a scout command is offered whenever the player owns at
+-- least one unit of that type, regardless of the current selection. The command
+-- can then dispatch unselected scouts (selected ones are merely prioritised).
+local owned = {}       -- unitID -> unitDefID (our types, on my team)
+local ownedCount = {}  -- unitDefID -> count
 
-function widget:SelectionChanged(selectedUnits)
-	showSparrow = false
-	showSwift   = false
-	local sparrowDef = cmdToDef[CMD_SCOUT_SPARROW]
-	local swiftDef   = cmdToDef[CMD_SCOUT_SWIFT]
-	for i = 1, #selectedUnits do
-		local defID = spGetUnitDefID(selectedUnits[i])
-		if defID == sparrowDef then
-			showSparrow = true
-		elseif defID == swiftDef then
-			showSwift = true
-		end
+local function AddOwned(unitID, unitDefID, unitTeam)
+	if unitTeam == myTeam and unitData[unitDefID] and not owned[unitID] then
+		owned[unitID] = unitDefID
+		ownedCount[unitDefID] = (ownedCount[unitDefID] or 0) + 1
+	end
+end
+
+local function RemoveOwned(unitID)
+	local unitDefID = owned[unitID]
+	if unitDefID then
+		ownedCount[unitDefID] = ownedCount[unitDefID] - 1
+		owned[unitID] = nil
+	end
+end
+
+local function RescanOwned()
+	owned = {}
+	ownedCount = {}
+	local teamUnits = spGetTeamUnits(myTeam)
+	for i = 1, #teamUnits do
+		AddOwned(teamUnits[i], spGetUnitDefID(teamUnits[i]), myTeam)
 	end
 end
 
 function widget:CommandsChanged()
 	local customCommands = widgetHandler.customCommands
-	if showSparrow then
+	if (ownedCount[cmdToDef[CMD_SCOUT_SPARROW]] or 0) > 0 then
 		customCommands[#customCommands + 1] = cmdSparrow
 	end
-	if showSwift then
+	if (ownedCount[cmdToDef[CMD_SCOUT_SWIFT]] or 0) > 0 then
 		customCommands[#customCommands + 1] = cmdSwift
 	end
 end
@@ -444,7 +455,27 @@ function widget:GameFrame(frame)
 	end
 end
 
-function widget:UnitDestroyed(unitID)
+--------------------------------------------------------------------------------
+-- Ownership callins
+--------------------------------------------------------------------------------
+function widget:UnitCreated(unitID, unitDefID, unitTeam)
+	AddOwned(unitID, unitDefID, unitTeam)
+end
+
+function widget:UnitGiven(unitID, unitDefID, newTeam, oldTeam)
+	if newTeam == myTeam then
+		AddOwned(unitID, unitDefID, newTeam)
+	end
+end
+
+function widget:UnitTaken(unitID, unitDefID, oldTeam, newTeam)
+	if oldTeam == myTeam then
+		RemoveOwned(unitID)
+	end
+end
+
+function widget:UnitDestroyed(unitID, unitDefID, unitTeam)
+	RemoveOwned(unitID)
 	tracked[unitID] = nil
 end
 
@@ -500,6 +531,7 @@ end
 
 function widget:PlayerChanged()
 	myTeam = Spring.GetMyTeamID()
+	RescanOwned()
 	RemoveIfSpectator()
 end
 
@@ -509,5 +541,6 @@ function widget:Initialize()
 		widgetHandler:RemoveWidget(widget)
 		return
 	end
+	RescanOwned()
 	RemoveIfSpectator()
 end
