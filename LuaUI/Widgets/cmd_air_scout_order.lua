@@ -63,10 +63,21 @@ local CMD_OPT_ALT        = CMD.OPT_ALT
 local CMD_OPT_SHIFT      = CMD.OPT_SHIFT
 local CMD_OPT_INTERNAL   = CMD.OPT_INTERNAL
 local CMD_ONECLICK       = Spring.Utilities.CMD.ONECLICK_WEAPON
+local CMD_RAW_MOVE       = Spring.Utilities.CMD.RAW_MOVE
 
 local FRAMES_PER_SECOND = 30
-local CLICK_THRESHOLD   = 20    -- drag shorter than this (elmos) counts as a click
-local CHECK_INTERVAL    = 3     -- frames between sprint-range checks
+local CLICK_THRESHOLD   = 20     -- drag shorter than this (elmos) counts as a click
+local CHECK_INTERVAL    = 3      -- frames between sprint-range checks
+local RETURN_DISTANCE_SQ = 250 * 250 -- how close to a pad counts as "back"
+
+-- Repair pads / air factories a Swift retreats toward after its run.
+local PAD_DEFS = {}
+for _, name in ipairs({"staticrearm", "factoryplane", "plateplane"}) do
+	local ud = UnitDefNames[name]
+	if ud then
+		PAD_DEFS[ud.id] = true
+	end
+end
 
 -- Custom command IDs (10285/10286 are free; 10283/10284 belong to Newton Firezone).
 local CMD_SCOUT_SPARROW = 10285
@@ -103,6 +114,9 @@ end
 
 BuildTypeData("planelightscout", CMD_SCOUT_SPARROW) -- Sparrow
 BuildTypeData("planefighter",    CMD_SCOUT_SWIFT)   -- Swift
+
+-- Only the Swift (which survives its run) retreats to a pad; the Sparrow detonates.
+local SWIFT_DEF = cmdToDef[CMD_SCOUT_SWIFT]
 
 --------------------------------------------------------------------------------
 -- Command descriptors
@@ -146,11 +160,21 @@ local scoutCommands = {
 -- can then dispatch unselected scouts (selected ones are merely prioritised).
 local owned = {}       -- unitID -> unitDefID (our types, on my team)
 local ownedCount = {}  -- unitDefID -> count
+local repairPads = {}  -- unitID -> {x, y, z} of my repair pads / air factories
+local returning = {}   -- unitID -> true while a Swift is flying back to a pad
 
 local function AddOwned(unitID, unitDefID, unitTeam)
-	if unitTeam == myTeam and unitData[unitDefID] and not owned[unitID] then
+	if unitTeam ~= myTeam then
+		return
+	end
+	if unitData[unitDefID] and not owned[unitID] then
 		owned[unitID] = unitDefID
 		ownedCount[unitDefID] = (ownedCount[unitDefID] or 0) + 1
+	elseif PAD_DEFS[unitDefID] and not repairPads[unitID] then
+		local x, y, z = spGetUnitPosition(unitID)
+		if x then
+			repairPads[unitID] = {x, y, z}
+		end
 	end
 end
 
@@ -160,15 +184,32 @@ local function RemoveOwned(unitID)
 		ownedCount[unitDefID] = ownedCount[unitDefID] - 1
 		owned[unitID] = nil
 	end
+	repairPads[unitID] = nil
+	returning[unitID] = nil
 end
 
 local function RescanOwned()
 	owned = {}
 	ownedCount = {}
+	repairPads = {}
+	returning = {}
 	local teamUnits = spGetTeamUnits(myTeam)
 	for i = 1, #teamUnits do
 		AddOwned(teamUnits[i], spGetUnitDefID(teamUnits[i]), myTeam)
 	end
+end
+
+-- Nearest repair pad to a position, with its squared distance.
+local function NearestPad(x, z)
+	local best, bestDistSq
+	for _, pos in pairs(repairPads) do
+		local dx, dz = pos[1] - x, pos[3] - z
+		local distSq = dx*dx + dz*dz
+		if not best or distSq < bestDistSq then
+			best, bestDistSq = pos, distSq
+		end
+	end
+	return best, bestDistSq
 end
 
 function widget:CommandsChanged()
@@ -341,7 +382,8 @@ local function DispatchPoints(defID, points, shift)
 	local teamUnits = spGetTeamUnits(myTeam)
 	for i = 1, #teamUnits do
 		local unitID = teamUnits[i]
-		if spGetUnitDefID(unitID) == defID and not spGetUnitIsDead(unitID) and IsFullyBuilt(unitID) then
+		if spGetUnitDefID(unitID) == defID and not spGetUnitIsDead(unitID) and IsFullyBuilt(unitID)
+				and not returning[unitID] then -- a Swift on its way back is not available
 			pool[#pool + 1] = unitID
 		end
 	end
@@ -374,6 +416,7 @@ local function DispatchPoints(defID, points, shift)
 		tracked[bestUnit] = {
 			x = pt[1], y = pt[2], z = pt[3],
 			sprintRangeSq = data.sprintRangeSq,
+			defID = defID,
 		}
 	end
 end
@@ -481,6 +524,23 @@ end
 --------------------------------------------------------------------------------
 -- Sprint / detonate trigger
 --------------------------------------------------------------------------------
+local function TriggerAbility(unitID, info)
+	-- A Swift survives its run, so queue a retreat to the nearest pad after it
+	-- reaches its point (append, so the sprint still carries it over the point),
+	-- then it will fly back to try to stay alive.
+	if info.defID == SWIFT_DEF then
+		local ux, _, uz = spGetUnitPosition(unitID)
+		local pad = ux and NearestPad(ux, uz)
+		if pad then
+			spGiveOrderToUnit(unitID, CMD_RAW_MOVE, {pad[1], pad[2], pad[3]}, CMD_OPT_SHIFT)
+			returning[unitID] = true -- unavailable until it is back at a pad
+		end
+	end
+	-- Insert the one-click ability at the front of the queue so the pending
+	-- move-to-point (and any queued retreat) is preserved.
+	spGiveOrderToUnit(unitID, CMD_INSERT, {0, CMD_ONECLICK, CMD_OPT_INTERNAL, 1}, CMD_OPT_ALT)
+end
+
 function widget:GameFrame(frame)
 	if frame % CHECK_INTERVAL ~= 0 then
 		return
@@ -492,10 +552,21 @@ function widget:GameFrame(frame)
 			local ux, _, uz = spGetUnitPosition(unitID)
 			local dx, dz = ux - info.x, uz - info.z
 			if dx*dx + dz*dz <= info.sprintRangeSq then
-				-- Insert the one-click ability at the front of the queue so the
-				-- pending move order is preserved (mirrors unit_oneclick_weapon).
-				spGiveOrderToUnit(unitID, CMD_INSERT, {0, CMD_ONECLICK, CMD_OPT_INTERNAL, 1}, CMD_OPT_ALT)
+				TriggerAbility(unitID, info)
 				tracked[unitID] = nil
+			end
+		end
+	end
+
+	-- A returning Swift becomes available again once it reaches a pad.
+	for unitID in pairs(returning) do
+		if (not spValidUnitID(unitID)) or spGetUnitIsDead(unitID) then
+			returning[unitID] = nil
+		else
+			local ux, _, uz = spGetUnitPosition(unitID)
+			local _, padDistSq = NearestPad(ux, uz)
+			if (not padDistSq) or padDistSq <= RETURN_DISTANCE_SQ then
+				returning[unitID] = nil
 			end
 		end
 	end
