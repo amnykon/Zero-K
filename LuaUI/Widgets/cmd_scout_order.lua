@@ -1,7 +1,7 @@
 function widget:GetInfo()
 	return {
-		name      = "Air Scout Order",
-		desc      = "Adds Sparrow and Swift scout commands. Drag to scatter a line of scouts spaced by LOS, or click for a single point. Each point is handed to a different scout, which sprints (Swift) or detonates (Sparrow) once it reaches the point.",
+		name      = "Scout Order",
+		desc      = "Adds Sparrow, Swift and Flea scout commands. Drag to scatter a line of scouts spaced by LOS, or click for a single point. Each point is handed to a different scout: the Swift sprints and the Sparrow detonates on arrival, while the Flea is sent to scout passively (return fire, building selection rank, deselected).",
 		author    = "Claude",
 		date      = "2026",
 		license   = "GNU GPL, v2 or later",
@@ -14,7 +14,7 @@ end
 --------------------------------------------------------------------------------
 -- Configuration
 --------------------------------------------------------------------------------
-options_path = 'Settings/Interface/Air Scout Order'
+options_path = 'Settings/Interface/Scout Order'
 options_order = { 'spacing', 'drawLine' }
 options = {
 	spacing = {
