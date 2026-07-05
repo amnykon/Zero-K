@@ -151,6 +151,7 @@ for _, entry in ipairs(bomberDefList) do
 				tooltip  = "Bomber attack run.",
 				cursor   = 'Attack',
 				action   = "bomberrun_" .. entry.cmdID,
+				texture  = 'LuaUI/Images/commands/Bold/attack.png', -- overridden by commandDisplayConfig's unit icon
 				disabled = false,
 				params   = { },
 			},

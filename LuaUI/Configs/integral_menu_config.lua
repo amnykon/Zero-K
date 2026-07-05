@@ -25,7 +25,7 @@ local function isMissileCommand(cmdID)
 	return missileCmdPos[cmdID] ~= nil
 end
 
--- Air scout run commands (see cmd_air_scout_order.lua). Like the missile
+-- Air scout run commands (see cmd_scout_order.lua). Like the missile
 -- launch commands, these live in their own tab that is independent of the
 -- current selection.
 local scoutCmds = {
