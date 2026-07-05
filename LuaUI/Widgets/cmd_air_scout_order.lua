@@ -48,6 +48,8 @@ local spGetUnitPosition    = Spring.GetUnitPosition
 local spGetUnitHealth      = Spring.GetUnitHealth
 local spGetUnitIsDead      = Spring.GetUnitIsDead
 local spGetUnitRulesParam  = Spring.GetUnitRulesParam
+local spGetUnitStates      = Spring.GetUnitStates
+local spSelectUnitArray    = Spring.SelectUnitArray
 local spGiveOrderToUnit    = Spring.GiveOrderToUnit
 local spValidUnitID        = Spring.ValidUnitID
 local spSetActiveCommand   = Spring.SetActiveCommand
@@ -64,6 +66,10 @@ local CMD_OPT_SHIFT      = CMD.OPT_SHIFT
 local CMD_OPT_INTERNAL   = CMD.OPT_INTERNAL
 local CMD_ONECLICK       = Spring.Utilities.CMD.ONECLICK_WEAPON
 local CMD_RAW_MOVE       = Spring.Utilities.CMD.RAW_MOVE
+local CMD_FIRE_STATE     = CMD.FIRE_STATE
+
+local FIRE_STATE_RETURN  = 1 -- 0 hold fire, 1 return fire, 2 fire at will
+local FLEA_RANK          = 1 -- selection rank Low, the same level as buildings
 
 local FRAMES_PER_SECOND = 30
 local CLICK_THRESHOLD   = 20     -- drag shorter than this (elmos) counts as a click
@@ -81,9 +87,10 @@ for id = 1, #UnitDefs do
 	end
 end
 
--- Custom command IDs (10285/10286 are free; 10283/10284 belong to Newton Firezone).
+-- Custom command IDs (10283/10284 are Newton Firezone; 10287-10293 are bombers).
 local CMD_SCOUT_SPARROW = 10285
 local CMD_SCOUT_SWIFT   = 10286
+local CMD_SCOUT_FLEA    = 10294
 
 --------------------------------------------------------------------------------
 -- Per-type data, derived from unit defs
@@ -91,32 +98,39 @@ local CMD_SCOUT_SWIFT   = 10286
 local myTeam = Spring.GetMyTeamID()
 local myAllyTeam = Spring.GetMyAllyTeamID()
 
--- unitData[unitDefID] = { cmdID, los, sprintRangeSq }
+-- unitData[unitDefID] = { cmdID, los, mode, sprintRangeSq }
+-- mode "sprint": Sparrow/Swift dash to the point and trigger their ability.
+-- mode "flea":   send a Flea and set it to a passive scouting state.
 local unitData = {}
 local cmdToDef = {}   -- cmdID -> unitDefID
 
-local function BuildTypeData(unitName, cmdID)
+local function BuildTypeData(unitName, cmdID, mode)
 	local ud = UnitDefNames[unitName]
 	if not ud then
 		return
 	end
-	local cp = ud.customParams or {}
-	local boostMult     = tonumber(cp.boost_speed_mult) or 5
-	local boostDuration = tonumber(cp.boost_duration) or 30 -- frames
-	-- Distance the scout dashes during its boost. Triggering the ability this far
-	-- from the point makes the Swift's dash / the Sparrow's detonation land on it.
-	local perFrameSpeed = (ud.speed or 0) / FRAMES_PER_SECOND
-	local sprintRange   = perFrameSpeed * boostMult * boostDuration
-	unitData[ud.id] = {
-		cmdID         = cmdID,
-		los           = ud.sightDistance or 500,
-		sprintRangeSq = sprintRange * sprintRange,
+	local data = {
+		cmdID = cmdID,
+		los   = ud.sightDistance or 500,
+		mode  = mode,
 	}
+	if mode == "sprint" then
+		local cp = ud.customParams or {}
+		local boostMult     = tonumber(cp.boost_speed_mult) or 5
+		local boostDuration = tonumber(cp.boost_duration) or 30 -- frames
+		-- Distance the scout dashes during its boost. Triggering the ability this
+		-- far from the point lands the Swift's dash / Sparrow's detonation on it.
+		local perFrameSpeed = (ud.speed or 0) / FRAMES_PER_SECOND
+		local sprintRange   = perFrameSpeed * boostMult * boostDuration
+		data.sprintRangeSq  = sprintRange * sprintRange
+	end
+	unitData[ud.id] = data
 	cmdToDef[cmdID] = ud.id
 end
 
-BuildTypeData("planelightscout", CMD_SCOUT_SPARROW) -- Sparrow
-BuildTypeData("planefighter",    CMD_SCOUT_SWIFT)   -- Swift
+BuildTypeData("planelightscout", CMD_SCOUT_SPARROW, "sprint") -- Sparrow
+BuildTypeData("planefighter",    CMD_SCOUT_SWIFT,   "sprint") -- Swift
+BuildTypeData("spiderscout",     CMD_SCOUT_FLEA,    "flea")   -- Flea
 
 -- Only the Swift (which survives its run) retreats to a pad; the Sparrow detonates.
 local SWIFT_DEF = cmdToDef[CMD_SCOUT_SWIFT]
@@ -152,10 +166,23 @@ local cmdSwift = {
 	params   = { },
 }
 
--- Stable order matching the tab column layout (Swift col 1, Sparrow col 2).
+local cmdFlea = {
+	id       = CMD_SCOUT_FLEA,
+	type     = CMDTYPE.ICON_MAP,
+	name     = "",
+	tooltip  = 'Flea Scout: click or drag a line to send Fleas to scout. Each is set to return fire, dropped to building selection rank and deselected.',
+	cursor   = 'Move',
+	action   = 'fleascout',
+	texture  = 'LuaUI/Images/commands/Bold/move.png',
+	disabled = false,
+	params   = { },
+}
+
+-- Stable order matching the tab column layout (Swift col 1, Sparrow col 2, Flea col 3).
 local scoutCommands = {
 	{cmdID = CMD_SCOUT_SWIFT,   desc = cmdSwift,   defID = cmdToDef[CMD_SCOUT_SWIFT]},
 	{cmdID = CMD_SCOUT_SPARROW, desc = cmdSparrow, defID = cmdToDef[CMD_SCOUT_SPARROW]},
+	{cmdID = CMD_SCOUT_FLEA,    desc = cmdFlea,    defID = cmdToDef[CMD_SCOUT_FLEA]},
 }
 
 -- Ownership tracking: a scout command is offered whenever the player owns at
@@ -352,7 +379,20 @@ end
 --------------------------------------------------------------------------------
 -- Unit selection and dispatch
 --------------------------------------------------------------------------------
-local tracked = {} -- unitID -> {x, y, z, sprintRangeSq}
+local tracked = {}   -- unitID -> {x, y, z, sprintRangeSq}
+local fleaState = {} -- unitID -> {fireState} while a Flea holds its scouting state
+
+-- A direct order from the player (one of these, not internal) restores a Flea.
+local RESTORE_CMDS = {
+	[CMD_MOVE]      = true,
+	[CMD_RAW_MOVE]  = true,
+	[CMD.FIGHT]     = true,
+	[CMD.ATTACK]    = true,
+	[CMD.PATROL]    = true,
+	[CMD.GUARD]     = true,
+	[CMD.STOP]      = true,
+	[CMD.MANUALFIRE] = true,
+}
 
 local function IsFullyBuilt(unitID)
 	local _, _, _, _, buildProgress = spGetUnitHealth(unitID)
@@ -373,6 +413,54 @@ local function CandidateTier(unitID, selectedSet)
 		return 1
 	end
 	return 2
+end
+
+-- Send a Flea to scout: passive states (return fire, building selection rank)
+-- and a move it will keep unless the player takes over. Widget orders are marked
+-- internal so they don't count as the player's own direct order.
+local function ApplyFleaScout(unitID, pt, shift)
+	local opt = CMD_OPT_INTERNAL + (shift and CMD_OPT_SHIFT or 0)
+	local states = spGetUnitStates(unitID)
+	fleaState[unitID] = { fireState = states and states.firestate }
+	spGiveOrderToUnit(unitID, CMD_MOVE, {pt[1], pt[2], pt[3]}, opt)
+	spGiveOrderToUnit(unitID, CMD_FIRE_STATE, {FIRE_STATE_RETURN}, CMD_OPT_INTERNAL)
+	if WG.SetSelectionRank then
+		WG.SetSelectionRank(unitID, FLEA_RANK)
+	end
+end
+
+-- Restore a Flea's normal states after the player gives it a direct order.
+local function RestoreFlea(unitID)
+	local st = fleaState[unitID]
+	if not st then
+		return
+	end
+	fleaState[unitID] = nil
+	if WG.SetSelectionRank then
+		WG.SetSelectionRank(unitID, nil) -- clear the override, back to default rank
+	end
+	if st.fireState then
+		spGiveOrderToUnit(unitID, CMD_FIRE_STATE, {st.fireState}, CMD_OPT_INTERNAL)
+	end
+end
+
+local function DeselectUnits(units)
+	local sel = spGetSelectedUnits()
+	local remove = {}
+	for i = 1, #units do
+		remove[units[i]] = true
+	end
+	local kept, changed = {}, false
+	for i = 1, #sel do
+		if remove[sel[i]] then
+			changed = true
+		else
+			kept[#kept + 1] = sel[i]
+		end
+	end
+	if changed then
+		spSelectUnitArray(kept)
+	end
 end
 
 local function DispatchPoints(defID, points, shift)
@@ -401,7 +489,9 @@ local function DispatchPoints(defID, points, shift)
 	end
 
 	local assigned = {}
+	local assignedFleas = {}
 	local moveOpt = shift and CMD_OPT_SHIFT or 0
+	local isFlea = (data.mode == "flea")
 
 	for p = 1, #points do
 		local pt = points[p]
@@ -424,12 +514,22 @@ local function DispatchPoints(defID, points, shift)
 		end
 
 		assigned[bestUnit] = true
-		spGiveOrderToUnit(bestUnit, CMD_MOVE, {pt[1], pt[2], pt[3]}, moveOpt)
-		tracked[bestUnit] = {
-			x = pt[1], y = pt[2], z = pt[3],
-			sprintRangeSq = data.sprintRangeSq,
-			defID = defID,
-		}
+		if isFlea then
+			ApplyFleaScout(bestUnit, pt, shift)
+			assignedFleas[#assignedFleas + 1] = bestUnit
+		else
+			spGiveOrderToUnit(bestUnit, CMD_MOVE, {pt[1], pt[2], pt[3]}, moveOpt)
+			tracked[bestUnit] = {
+				x = pt[1], y = pt[2], z = pt[3],
+				sprintRangeSq = data.sprintRangeSq,
+				defID = defID,
+			}
+		end
+	end
+
+	-- Fleas are deselected so they drop out of the way after being sent.
+	if #assignedFleas > 0 then
+		DeselectUnits(assignedFleas)
 	end
 end
 
@@ -609,6 +709,20 @@ end
 function widget:UnitDestroyed(unitID, unitDefID, unitTeam)
 	RemoveOwned(unitID)
 	tracked[unitID] = nil
+	fleaState[unitID] = nil
+end
+
+-- Restore a scouting Flea's states once the player gives it a direct order.
+function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOpts)
+	if not fleaState[unitID] then
+		return
+	end
+	if cmdOpts and cmdOpts.internal then
+		return -- our own orders (the scout move / state changes)
+	end
+	if RESTORE_CMDS[cmdID] then
+		RestoreFlea(unitID)
+	end
 end
 
 --------------------------------------------------------------------------------

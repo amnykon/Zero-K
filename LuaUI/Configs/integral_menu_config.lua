@@ -28,6 +28,7 @@ end
 local scoutCmds = {
 	{id = 10286, name = "Swift Run", icon = "planefighter", col = 1, row = 1, tooltip = "Swift Scout Run\nClick or drag a line to scatter Swifts. Each speed-boosts to reach its point."},
 	{id = 10285, name = "Sparrow Run", icon = "planelightscout", col = 2, row = 1, tooltip = "Sparrow Scout Run\nClick or drag a line to scatter Sparrows. Each detonates on arrival for a reveal ping."},
+	{id = 10294, name = "Flea Scout", icon = "spiderscout", col = 3, row = 1, tooltip = "Flea Scout\nClick or drag a line to send Fleas. Each is set to return fire, dropped to building selection rank and deselected."},
 }
 
 local scoutCmdPos = {}
@@ -606,7 +607,8 @@ local function hasScoutUnits()
 		local unitDefID = Spring.GetUnitDefID(unitID)
 		if unitDefID then
 			local unitDef = UnitDefs[unitDefID]
-			if unitDef and (unitDef.name == "planefighter" or unitDef.name == "planelightscout") then
+			if unitDef and (unitDef.name == "planefighter" or unitDef.name == "planelightscout"
+					or unitDef.name == "spiderscout") then
 				return true
 			end
 		end
