@@ -83,14 +83,16 @@ local CMD_AIR_MANUAL_FIRE = CMD_AIR_MANUALFIRE -- from customcmds.h.lua
 --
 -- Odin appears twice: its bombs (precision, buildings only) and its shield dgun,
 -- which is splash and fired at the ground (CMD_AIR_MANUALFIRE on weapon 3).
+-- action is the bindable hotkey name shown in Settings -> Hotkeys (grid hotkeys
+-- also work when the Strike tab is focused).
 local bomberDefList = {
-	{cmdID = 10287, unitName = "bomberriot",    splash = true,  damage = 0,    manualFire = false, targetGround = false, maxTargetSpeed = 75},  -- Phoenix (napalm)
-	{cmdID = 10288, unitName = "bomberheavy",   splash = true,  damage = 2000, manualFire = false, targetGround = false, maxTargetSpeed = 150}, -- Likho (homing)
-	{cmdID = 10289, unitName = "bomberdisarm",  splash = true,  damage = 0,    manualFire = false, targetGround = false, maxTargetSpeed = 150}, -- Thunderbird (beam)
-	{cmdID = 10290, unitName = "bomberassault", splash = false, damage = 2500, manualFire = false, targetGround = false, maxTargetSpeed = 0},   -- Odin bombs (buildings only)
-	{cmdID = 10291, unitName = "bomberassault", splash = true,  damage = 0,    manualFire = true,  targetGround = true,  maxTargetSpeed = nil}, -- Odin shield dgun
-	{cmdID = 10292, unitName = "bomberstrike",  splash = false, damage = 180,  manualFire = false, targetGround = false, maxTargetSpeed = 150}, -- Magpie (homing)
-	{cmdID = 10293, unitName = "bomberprec",    splash = false, damage = 800,  manualFire = false, targetGround = false, maxTargetSpeed = 90},  -- Raven (precision)
+	{cmdID = 10287, unitName = "bomberriot",    action = "bomberrun_phoenix",     splash = true,  damage = 0,    manualFire = false, targetGround = false, maxTargetSpeed = 75},  -- Phoenix (napalm)
+	{cmdID = 10288, unitName = "bomberheavy",   action = "bomberrun_likho",       splash = true,  damage = 2000, manualFire = false, targetGround = false, maxTargetSpeed = 150}, -- Likho (homing)
+	{cmdID = 10289, unitName = "bomberdisarm",  action = "bomberrun_thunderbird", splash = true,  damage = 0,    manualFire = false, targetGround = false, maxTargetSpeed = 150}, -- Thunderbird (beam)
+	{cmdID = 10290, unitName = "bomberassault", action = "bomberrun_odin",        splash = false, damage = 2500, manualFire = false, targetGround = false, maxTargetSpeed = 0},   -- Odin bombs (buildings only)
+	{cmdID = 10291, unitName = "bomberassault", action = "bomberrun_odinshield",  splash = true,  damage = 0,    manualFire = true,  targetGround = true,  maxTargetSpeed = nil}, -- Odin shield dgun
+	{cmdID = 10292, unitName = "bomberstrike",  action = "bomberrun_magpie",      splash = false, damage = 180,  manualFire = false, targetGround = false, maxTargetSpeed = 150}, -- Magpie (homing)
+	{cmdID = 10293, unitName = "bomberprec",    action = "bomberrun_raven",       splash = false, damage = 800,  manualFire = false, targetGround = false, maxTargetSpeed = 90},  -- Raven (precision)
 }
 
 local myTeam    = Spring.GetMyTeamID()
@@ -150,7 +152,7 @@ for _, entry in ipairs(bomberDefList) do
 				name     = "",
 				tooltip  = "Bomber attack run.",
 				cursor   = 'Attack',
-				action   = "bomberrun_" .. entry.cmdID,
+				action   = entry.action,
 				texture  = 'LuaUI/Images/commands/Bold/attack.png', -- overridden by commandDisplayConfig's unit icon
 				disabled = false,
 				params   = { },
