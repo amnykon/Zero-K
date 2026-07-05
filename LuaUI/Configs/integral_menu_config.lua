@@ -1,16 +1,19 @@
 local buildCmdFactory, buildCmdEconomy, buildCmdDefence, buildCmdSpecial, buildCmdUnits, cmdPosDef, factoryUnitPosDef = include("Configs/integral_menu_commands_processed.lua", nil, VFS.RAW_FIRST)
 
--- Row 1: Trinity and Reef (standalone, not silo missiles).
--- Row 2: the missile silo's missiles, in the silo's buildoptions order
--- (tacnuke, seismic, empmissile, napalmmissile, missileslow).
+-- Shared "Strike" tab, laid out to follow the units' order in their factories.
+-- Row 1: the missile silo's missiles, in the silo's buildoptions order
+--        (tacnuke, seismic, empmissile, napalmmissile, missileslow), plus Odin's
+--        shield dgun in the spare slot.
+-- Row 2: the air factory's bombers in buildoptions order.
+-- Row 3: Reef and Trinity (standalone, not silo missiles).
 local missileCmds = {
-	{id = 39615, name = "Trinity", icon = "staticnuke", col = 1, row = 1, tooltip = "Launch Trinity (Strategic Nuke)\nLong-range nuclear missile."},
-	{id = 39614, name = "Reef Missile", icon = "shipcarrier", col = 2, row = 1, tooltip = "Launch Disarm Missile\nDisables units temporarily."},
-	{id = 39610, name = "EOS", icon = "tacnuke", col = 1, row = 2, tooltip = "Launch EOS (Tactical Nuke)\nTactical nuclear missile with high damage."},
-	{id = 39611, name = "Seismic", icon = "seismic", col = 2, row = 2, tooltip = "Launch Seismic\nArea denial seismic missile, slows units."},
-	{id = 39612, name = "Shockley", icon = "empmissile", col = 3, row = 2, tooltip = "Launch Shockley (EMP)\nElectromagnetic pulse missile disables units."},
-	{id = 39613, name = "Inferno", icon = "napalmmissile", col = 4, row = 2, tooltip = "Launch Inferno (Napalm)\nNapalm missile with persistent damage."},
-	{id = 39616, name = "Zeno", icon = "missileslow", col = 5, row = 2, tooltip = "Launch Zeno (Slow Missile)\nSlow homing missile with lingering damage."},
+	{id = 39610, name = "EOS", icon = "tacnuke", col = 1, row = 1, tooltip = "Launch EOS (Tactical Nuke)\nTactical nuclear missile with high damage."},
+	{id = 39611, name = "Seismic", icon = "seismic", col = 2, row = 1, tooltip = "Launch Seismic\nArea denial seismic missile, slows units."},
+	{id = 39612, name = "Shockley", icon = "empmissile", col = 3, row = 1, tooltip = "Launch Shockley (EMP)\nElectromagnetic pulse missile disables units."},
+	{id = 39613, name = "Inferno", icon = "napalmmissile", col = 4, row = 1, tooltip = "Launch Inferno (Napalm)\nNapalm missile with persistent damage."},
+	{id = 39616, name = "Zeno", icon = "missileslow", col = 5, row = 1, tooltip = "Launch Zeno (Slow Missile)\nSlow homing missile with lingering damage."},
+	{id = 39614, name = "Reef Missile", icon = "shipcarrier", col = 1, row = 3, tooltip = "Launch Disarm Missile\nDisables units temporarily."},
+	{id = 39615, name = "Trinity", icon = "staticnuke", col = 2, row = 3, tooltip = "Launch Trinity (Strategic Nuke)\nLong-range nuclear missile."},
 }
 
 local missileCmdPos = {}
@@ -41,17 +44,18 @@ local function isScoutCommand(cmdID)
 end
 
 -- Bomber area-attack commands (see cmd_bomber_attack_order.lua). One button per
--- bomber type, plus a second Odin button for its shield dgun. Own tab, like the
--- missile launch tab, independent of the current selection.
--- Row 1: splash bombers and Odin's two buttons. Row 2: precision (non-splash).
+-- bomber type, plus a second Odin button for its shield dgun. These share the
+-- "Strike" tab with the missiles, independent of the current selection.
+-- Row 2 lists the bombers in air-factory buildoptions order; Odin's shield dgun
+-- rides in the missile row's spare slot (col 6, row 1).
 local bomberCmds = {
-	{id = 10287, name = "Phoenix Run", icon = "bomberriot", col = 1, row = 1, tooltip = "Phoenix Napalm Run\nDrag a circle; Phoenixes spread saturation napalm across the targets."},
-	{id = 10288, name = "Likho Run", icon = "bomberheavy", col = 2, row = 1, tooltip = "Likho Run\nDrag a circle; Likhos spread singularity bombs across the targets."},
-	{id = 10289, name = "Thunderbird Run", icon = "bomberdisarm", col = 3, row = 1, tooltip = "Thunderbird Run\nDrag a circle; Thunderbirds spread disarm strikes across the targets."},
-	{id = 10290, name = "Odin Run", icon = "bomberassault", col = 4, row = 1, tooltip = "Odin Assault Run\nDrag a circle; Odins focus enough bombs to destroy each building before moving on (buildings only)."},
-	{id = 10291, name = "Odin Shield", icon = "bomberassault", texture = imageDir .. 'Bold/dgun.png', col = 5, row = 1, tooltip = "Odin Shield Run\nDrag a circle; Odins deploy their shield dgun on the ground, spread across the area."},
 	{id = 10292, name = "Magpie Run", icon = "bomberstrike", col = 1, row = 2, tooltip = "Magpie Strike\nDrag a circle; Magpies focus-fire each target with enough strikes to kill it before moving on."},
 	{id = 10293, name = "Raven Run", icon = "bomberprec", col = 2, row = 2, tooltip = "Raven Precision Strike\nDrag a circle; Ravens focus-fire each target with enough bombs to kill it before moving on."},
+	{id = 10287, name = "Phoenix Run", icon = "bomberriot", col = 3, row = 2, tooltip = "Phoenix Napalm Run\nDrag a circle; Phoenixes spread saturation napalm across the targets."},
+	{id = 10289, name = "Thunderbird Run", icon = "bomberdisarm", col = 4, row = 2, tooltip = "Thunderbird Run\nDrag a circle; Thunderbirds spread disarm strikes across the targets."},
+	{id = 10290, name = "Odin Run", icon = "bomberassault", col = 5, row = 2, tooltip = "Odin Assault Run\nDrag a circle; Odins focus enough bombs to destroy each building before moving on (buildings only)."},
+	{id = 10288, name = "Likho Run", icon = "bomberheavy", col = 6, row = 2, tooltip = "Likho Run\nDrag a circle; Likhos spread singularity bombs across the targets."},
+	{id = 10291, name = "Odin Shield", icon = "bomberassault", texture = imageDir .. 'Bold/dgun.png', col = 6, row = 1, tooltip = "Odin Shield Run\nDrag a circle; Odins deploy their shield dgun on the ground, spread across the area."},
 }
 
 local bomberCmdPos = {}
@@ -641,12 +645,20 @@ end
 
 local commandPanels = {
 	{
-		humanName = "Launch",
-		name = "missiles",
+		humanName = "Strike",
+		name = "strike",
+		-- Hosts both the missile launch commands and the bomber run commands,
+		-- each gated on owning the relevant units.
 		inclusionFunction = function(cmdID)
-			if not hasMissileUnits() then return false end
-			local pos = missileCmdPos[cmdID]
-			return pos ~= nil, pos
+			local mPos = missileCmdPos[cmdID]
+			if mPos then
+				return hasMissileUnits(), mPos
+			end
+			local bPos = bomberCmdPos[cmdID]
+			if bPos then
+				return hasBomberUnits(), bPos
+			end
+			return false
 		end,
 		loiterable = true,
 		alwaysShowTab = true,
@@ -669,22 +681,6 @@ local commandPanels = {
 		topRow = true,
 		buttonLayoutConfig = buttonLayoutConfig.command,
 		badgeIconsWG = "airScoutActiveIcons",
-		gridHotkeys = true,
-		returnOnClick = "orders",
-	},
-	{
-		humanName = "Bombers",
-		name = "bombers",
-		inclusionFunction = function(cmdID)
-			if not hasBomberUnits() then return false end
-			local pos = bomberCmdPos[cmdID]
-			return pos ~= nil, pos
-		end,
-		loiterable = true,
-		alwaysShowTab = true,
-		topRow = true,
-		buttonLayoutConfig = buttonLayoutConfig.command,
-		badgeIconsWG = "bomberActiveIcons",
 		gridHotkeys = true,
 		returnOnClick = "orders",
 	},
