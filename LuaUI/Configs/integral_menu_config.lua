@@ -664,7 +664,7 @@ local commandPanels = {
 		alwaysShowTab = true,
 		topRow = true,
 		buttonLayoutConfig = buttonLayoutConfig.command,
-		badgeIconsWG = "missileActiveIcons",
+		badgeIconsWG = {"missileActiveIcons", "bomberActiveIcons"},
 		gridHotkeys = true,
 		returnOnClick = "orders",
 	},

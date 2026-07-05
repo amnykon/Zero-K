@@ -2918,9 +2918,25 @@ function widget:Update()
 	for i = 1, #commandPanels do
 		local panelData = commandPanels[i]
 
-		-- Update badge icons (one per active missile type)
+		-- Update badge icons. badgeIconsWG is a WG key, or a list of keys whose
+		-- icon lists are concatenated (e.g. missiles + bombers on the Strike tab).
 		if panelData.badgeIconsWG and panelData.tabButton and panelData.tabButton.UpdateBadgeIcons then
-			panelData.tabButton.UpdateBadgeIcons(WG[panelData.badgeIconsWG])
+			local key = panelData.badgeIconsWG
+			local icons
+			if type(key) == "table" then
+				icons = {}
+				for k = 1, #key do
+					local list = WG[key[k]]
+					if list then
+						for j = 1, #list do
+							icons[#icons + 1] = list[j]
+						end
+					end
+				end
+			else
+				icons = WG[key]
+			end
+			panelData.tabButton.UpdateBadgeIcons(icons)
 		end
 	end
 end
