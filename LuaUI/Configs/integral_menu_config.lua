@@ -1,5 +1,22 @@
 local buildCmdFactory, buildCmdEconomy, buildCmdDefence, buildCmdSpecial, buildCmdUnits, cmdPosDef, factoryUnitPosDef = include("Configs/integral_menu_commands_processed.lua", nil, VFS.RAW_FIRST)
 
+-- Launch tab layout, derived from the shared missile config so ids, positions and
+-- tooltips live in one place (Configs/missile_config.lua) alongside the widget behaviour.
+local missileConfig = include("Configs/missile_config.lua", nil, VFS.RAW_FIRST)
+local missileCmds = {}
+for _, m in ipairs(missileConfig) do
+	missileCmds[#missileCmds + 1] = {id = m.cmd, name = m.label, icon = m.unit, col = m.col, row = m.row, tooltip = m.tooltip}
+end
+
+local missileCmdPos = {}
+for _, missile in ipairs(missileCmds) do
+	missileCmdPos[missile.id] = {col = missile.col, row = missile.row}
+end
+
+local function isMissileCommand(cmdID)
+	return missileCmdPos[cmdID] ~= nil
+end
+
 --------------------------------------------------------------------------------
 --------------------------------------------------------------------------------
 -- Tooltips
@@ -29,7 +46,7 @@ local tooltips = {
 	GOO_GATHER = "Puppy Replication (_STATE_)\n  Set whether Puppies use nearby wrecks to make more Puppies.",
 	DISABLE_ATTACK = "Allow Attack Commands (_STATE_)\n  Set whether the unit responds to attack commands.",
 	PUSH_PULL = "Impulse Mode (_STATE_)\n  Set whether gravity guns push or pull.",
-	DONT_FIRE_AT_RADAR = "Fire At Radar State (_STATE_)\n  Set whether precise units with high reload time fire at radar dots.",
+	DONT_FIRE_AT_RADAR = "Fire At Radar State (_STATE_)\n  Set whether precise units with high reload time fire on uncertain enemy positions within radar.",
 	PREVENT_BAIT = "Avoid Bad Targets (_STATE_)\n  _DESC_",
 	PREVENT_OVERKILL = "Overkill Prevention (_STATE_)\n  Prevents units from shooting at already doomed enemies.",
 	TRAJECTORY = "Trajectory (_STATE_)\n  Set whether units fire at a high or low arc.",
@@ -210,10 +227,10 @@ local commandDisplayConfig = {
 		},
 		stateTooltip = {
 			tooltips.PREVENT_BAIT:gsub("_STATE_", "Disabled"):gsub("_DESC_", "Enable this to ignore bad targets when not on Force Fire or Attack Move."),
-			tooltips.PREVENT_BAIT:gsub("_STATE_", "Free"):gsub("_DESC_", "Avoid light drones, Wind, Solar, Claw, Dirtbag and armoured targets."),
-			tooltips.PREVENT_BAIT:gsub("_STATE_", "Light"):gsub("_DESC_", "Avoid cost under 90, Razor, Sparrow, unknown radar and armour."),
-			tooltips.PREVENT_BAIT:gsub("_STATE_", "Medium"):gsub("_DESC_", "Avoid cost under 240, minus Stardust, Raptor, unknown radar and armour."),
-			tooltips.PREVENT_BAIT:gsub("_STATE_", "Heavy"):gsub("_DESC_", "Avoid cost under 420, unknown radar dots and armour."),
+			tooltips.PREVENT_BAIT:gsub("_STATE_", "Free"):gsub("_DESC_", "Avoid light drones, Wind, Solar, Claw, Dirtbag, nanoframes cheaper than 50 and armoured targets."),
+			tooltips.PREVENT_BAIT:gsub("_STATE_", "Light"):gsub("_DESC_", "Avoid targets cheaper than 90, Razor, Sparrow, unknown radar dots and armoured targets."),
+			tooltips.PREVENT_BAIT:gsub("_STATE_", "Medium"):gsub("_DESC_", "Avoid targets cheaper than 240 (except Stardust), Raptor, unknown radar dots and armoured targets."),
+			tooltips.PREVENT_BAIT:gsub("_STATE_", "Heavy"):gsub("_DESC_", "Avoid targets cheaper than 420, unknown radar dots and armoured targets."),
 		}
 	},
 	[CMD_RETREAT] = {
@@ -368,9 +385,9 @@ end
 local textConfig = {
 	bottomLeft = {
 		name = "bottomLeft",
-		x = "15%",
+		x = "10%",
 		right = 0,
-		bottom = 2,
+		bottom = "10%",
 		height = 12,
 		fontsize = 12,
 	},
@@ -390,8 +407,8 @@ local textConfig = {
 	},
 	queue = {
 		name = "queue",
-		right = "18%",
-		bottom = "14%",
+		right = "15%",
+		bottom = "15%",
 		align = "right",
 		fontsize = 16,
 		height = 16,
@@ -413,24 +430,26 @@ local buttonLayoutConfig = {
 	},
 	build = {
 		image = {
-			x = "5%",
-			y = "4%",
-			right = "5%",
-			bottom = 12,
+			x = 0,
+			y = 0,
+			right = 1,
+			bottom = 1,
 			keepAspect = false,
 		},
 		tooltipPrefix = "Build",
+		invisibleButton = true,
 		showCost = true
 	},
 	buildunit = {
 		image = {
-			x = "5%",
-			y = "4%",
-			right = "5%",
-			bottom = 12,
+			x = 0,
+			y = 0,
+			right = 1,
+			bottom = 1,
 			keepAspect = false,
 		},
 		tooltipPrefix = "BuildUnit",
+		invisibleButton = true,
 		showCost = true
 	},
 	queue = {
@@ -483,7 +502,55 @@ local factoryButtonLayoutOverride = {
 	}
 }
 
+for _, missile in ipairs(missileCmds) do
+	local unitDef = UnitDefNames[missile.icon]
+	local icon = unitDef and ("#" .. unitDef.id) or (imageDir .. 'Bold/attack.png')
+	commandDisplayConfig[missile.id] = {
+		texture = icon,
+		tooltip = missile.tooltip,
+		drawName = true, -- show the stockpile count / build progress string (set by the missile widget)
+	}
+end
+
+-- Owning any launcher-relevant unit (a launcher, its ammo, or a silo) surfaces the tab.
+local missileUnitNames = {["staticmissilesilo"] = true}
+for _, m in ipairs(missileConfig) do
+	for _, l in ipairs(m.launch) do
+		missileUnitNames[l.unit] = true
+	end
+end
+
+local function hasMissileUnits()
+	local teamUnits = Spring.GetTeamUnits(Spring.GetMyTeamID()) or {}
+	for _, unitID in ipairs(teamUnits) do
+		local unitDefID = Spring.GetUnitDefID(unitID)
+		if unitDefID then
+			local unitDef = UnitDefs[unitDefID]
+			if unitDef and missileUnitNames[unitDef.name] then
+				return true
+			end
+		end
+	end
+	return false
+end
+
 local commandPanels = {
+	{
+		humanName = "Launch",
+		name = "missiles",
+		inclusionFunction = function(cmdID)
+			if not hasMissileUnits() then return false end
+			local pos = missileCmdPos[cmdID]
+			return pos ~= nil, pos
+		end,
+		loiterable = true,
+		hiddenTab = true,
+		buttonLayoutConfig = buttonLayoutConfig.command,
+		gridHotkeys = true,
+		-- No returnOnClick: firing should not close the launcher, so multiple missiles
+		-- can be fired in a row. It is dismissed explicitly (right-click / select a
+		-- unit / toggle the launch button).
+	},
 	{
 		humanName = "Orders",
 		name = "orders",
@@ -491,7 +558,8 @@ local commandPanels = {
 			return ((cmdID >= 0 or unitMobilePanelSize == 1) and
 				not buildCmdEconomy[cmdID] and not buildCmdFactory[cmdID] and
 				not buildCmdSpecial[cmdID] and not buildCmdDefence[cmdID] and
-				not plateCommandID[cmdID])
+				not plateCommandID[cmdID] and
+				not isMissileCommand(cmdID))
 		end,
 		loiterable = true,
 		buttonLayoutConfig = buttonLayoutConfig.command,
