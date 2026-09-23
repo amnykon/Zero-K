@@ -98,9 +98,9 @@ for i = 1, #UnitDefs do
 	end
 	if cp.pylonrange then
 		pylonRange[i] = cp.pylonrange
-	end
-	if ud.floatOnWater then
-		floatOnWater[i] = true
+		if ud.floatOnWater then
+			floatOnWater[i] = true
+		end
 	end
 end
 
