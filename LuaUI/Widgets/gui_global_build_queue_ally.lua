@@ -94,40 +94,56 @@ local rep_color = {0.0, 0.8, 0.4, 1.0}
 local rec_color = {0.6, 0.0, 1.0, 1.0}
 local res_color = {0.4, 0.8, 1.0, 1.0}
 
--- Network protocol: "GBCQ|<seq>|<chunkIndex>|<chunkCount>|<data>"
--- <data> is zero or more ';'-terminated job records, each of the form:
---   id,x,y,z,h,r,target,workers
--- Empty optional fields (h, r, target, workers) are encoded as "".
+-- Network protocol: "GBCQ|<type>|<seq>|<chunkIndex>|<chunkCount>|<data>"
+-- <type> is "F" (full snapshot) or "D" (delta). <data> is zero or more
+-- ';'-terminated records, each of one of two forms:
+--   U,<hash>,<id>,<x>,<y>,<z>,<h>,<r>,<target>,<workers>   -- add/update a job
+--   R,<hash>                                               -- remove a job
+-- A full snapshot ('F') contains only "U" records and replaces the receiver's
+-- entire stored queue for that sender. A delta ('D') applies its "U"/"R"
+-- records on top of whatever the receiver already has. Empty optional fields
+-- (h, r, target, workers) are encoded as "".
+--   hash    : a stable identifier for the job across calls (see SetLocalQueue)
 --   id      : negative unitDefID for a build job, or CMD.REPAIR/RECLAIM/RESURRECT
 --   x, y, z : world position (for build jobs, area jobs, and cached feature positions)
 --   h       : build facing (0-3), build jobs only
 --   r       : area radius, area repair/reclaim/resurrect jobs only
 --   target  : unit or feature ID (Game.maxUnits + featureID), single-target jobs only
 --   workers : number of workers currently assigned to the job (purely informational)
+--
+-- Deltas alone are enough to keep everyone in sync even for a player who joins
+-- mid-game: Spring's join-in-progress catch-up replays the recorded network
+-- packet stream (including SendLuaUIMsg) from the start of the game, the same
+-- way demo playback does. The periodic full snapshot below exists only as a
+-- cheap safety net (e.g. for a widget that gets enabled mid-game, or to bound
+-- the damage from a dropped/malformed message), not for late joiners.
 local MSG_PREFIX = "GBCQ|"
 local MAX_CHUNK_DATA_LEN = 800
-local SEND_INTERVAL = 1.0 -- seconds between broadcasts of a changed queue
-local EXPIRE_TIME = 6.0 -- seconds without an update before we drop a player's queue
+local DELTA_INTERVAL = 0.5 -- seconds between checks for changes to broadcast
+local RESYNC_INTERVAL = 30.0 -- seconds between unconditional full-snapshot resyncs
+local EXPIRE_TIME = 3 * RESYNC_INTERVAL -- time without any update before we drop a player's queue
 
 local myPlayerID = spGetMyPlayerID()
 
 -- Our own queue, as given to us through the public API (see bottom of file).
-local localJobs = {} -- array of job tables, see field docs above
-local localRev = 0 -- bumped by SetLocalQueue() whenever the content changes
-local lastSentRev = -1 -- localRev value we last actually broadcast
+-- Keyed by a stable per-job hash, exactly like GBC's own buildQueue table.
+local localJobs = {}
+local lastSentJobs = {} -- what we last told everyone we have, keyed the same way
 local sendSeq = 0 -- transfer id for the chunked messages we send
-local sendTimer = SEND_INTERVAL -- send promptly the first time we have something to say
+local deltaTimer = 0
+local resyncTimer = 0
 
 -- Other players' queues, as received over the network.
-local allyQueues = {} -- allyQueues[playerID] = {teamID=, jobs={...}, updatedAt=os.clock()}
-local pendingChunks = {} -- pendingChunks[playerID] = {seq=, count=, parts={}, received=}
+local allyQueues = {} -- allyQueues[playerID] = {teamID=, jobs={[hash]=job}, updatedAt=os.clock()}
+local pendingChunks = {} -- pendingChunks[playerID] = {type=, seq=, count=, parts={}, received=}
 
 --------------------------------------------------------------------------------
 --------------------------------------------------------------------------------
 -- Encoding / Decoding ---------------------------------------------------------
 
-local function EncodeJob(job)
-	return (job.id or 0) .. ","
+local function EncodeUpsert(hash, job)
+	return "U," .. hash .. ","
+		.. (job.id or 0) .. ","
 		.. floor(job.x or 0) .. ","
 		.. floor(job.y or 0) .. ","
 		.. floor(job.z or 0) .. ","
@@ -138,40 +154,41 @@ local function EncodeJob(job)
 		.. ";"
 end
 
-local function DecodeJob(record)
-	local id, x, y, z, h, r, target, workers = record:match("^(-?%d+),(-?%d+),(-?%d+),(-?%d+),(%d*),(%d*),(%d*),(%d*)$")
-	if not id then
-		return nil
-	end
-	return {
-		id = tonumber(id),
-		x = tonumber(x), y = tonumber(y), z = tonumber(z),
-		h = (h ~= "") and tonumber(h) or nil,
-		r = (r ~= "") and tonumber(r) or nil,
-		target = (target ~= "") and tonumber(target) or nil,
-		workers = (workers ~= "") and tonumber(workers) or nil,
-	}
+local function EncodeRemove(hash)
+	return "R," .. hash .. ";"
 end
 
-local function DecodeJobsData(data)
-	local jobs = {}
-	for record in data:gmatch("([^;]+);") do
-		local job = DecodeJob(record)
-		if job then
-			jobs[#jobs+1] = job
+-- Returns op ("U" or "R"), hash, and (for "U") the decoded job table.
+local function DecodeRecord(record)
+	local op, rest = record:match("^(%a),(.*)$")
+	if op == "R" then
+		return "R", rest
+	elseif op == "U" then
+		local hash, id, x, y, z, h, r, target, workers =
+			rest:match("^([^,]+),(-?%d+),(-?%d+),(-?%d+),(-?%d+),(%d*),(%d*),(%d*),(%d*)$")
+		if not hash then
+			return nil
 		end
+		return "U", hash, {
+			id = tonumber(id),
+			x = tonumber(x), y = tonumber(y), z = tonumber(z),
+			h = (h ~= "") and tonumber(h) or nil,
+			r = (r ~= "") and tonumber(r) or nil,
+			target = (target ~= "") and tonumber(target) or nil,
+			workers = (workers ~= "") and tonumber(workers) or nil,
+		}
 	end
-	return jobs
+	return nil
 end
 
--- Splits already-encoded (';'-terminated) job records into chunk strings, never
+-- Splits already-encoded (';'-terminated) records into chunk strings, never
 -- splitting a record across a chunk boundary.
-local function BuildChunks(jobs)
+local function BuildChunks(records)
 	local chunks = {}
 	local current = {}
 	local currentLen = 0
-	for i = 1, #jobs do
-		local record = EncodeJob(jobs[i])
+	for i = 1, #records do
+		local record = records[i]
 		if currentLen > 0 and currentLen + #record > MAX_CHUNK_DATA_LEN then
 			chunks[#chunks+1] = table.concat(current)
 			current = {}
@@ -190,20 +207,81 @@ end
 --------------------------------------------------------------------------------
 -- Sending -----------------------------------------------------------------
 
-local function BroadcastLocalQueue()
+local function SendBatch(typeChar, records)
 	sendSeq = sendSeq + 1
-	local chunks = BuildChunks(localJobs)
+	local chunks = BuildChunks(records)
 	for i = 1, #chunks do
-		local msg = MSG_PREFIX .. sendSeq .. "|" .. i .. "|" .. #chunks .. "|" .. chunks[i]
+		local msg = MSG_PREFIX .. typeChar .. "|" .. sendSeq .. "|" .. i .. "|" .. #chunks .. "|" .. chunks[i]
 		spSendLuaUIMsg(msg, "a")
 		spSendLuaUIMsg(msg, "s")
 	end
-	lastSentRev = localRev
+end
+
+local function BroadcastFull()
+	local records = {}
+	for hash, job in pairs(localJobs) do
+		records[#records+1] = EncodeUpsert(hash, job)
+	end
+	SendBatch("F", records)
+
+	lastSentJobs = {}
+	for hash, job in pairs(localJobs) do
+		lastSentJobs[hash] = job
+	end
+end
+
+local function JobsEqual(a, b)
+	return a.id == b.id and a.x == b.x and a.y == b.y and a.z == b.z
+		and a.h == b.h and a.r == b.r and a.target == b.target and a.workers == b.workers
+end
+
+local function BroadcastDeltaIfChanged()
+	local records = {}
+	for hash in pairs(lastSentJobs) do
+		if not localJobs[hash] then
+			records[#records+1] = EncodeRemove(hash)
+		end
+	end
+	for hash, job in pairs(localJobs) do
+		local prev = lastSentJobs[hash]
+		if not prev or not JobsEqual(prev, job) then
+			records[#records+1] = EncodeUpsert(hash, job)
+		end
+	end
+
+	if #records == 0 then
+		return
+	end
+	SendBatch("D", records)
+
+	lastSentJobs = {}
+	for hash, job in pairs(localJobs) do
+		lastSentJobs[hash] = job
+	end
 end
 
 --------------------------------------------------------------------------------
 --------------------------------------------------------------------------------
 -- Receiving -----------------------------------------------------------------
+
+local function ApplyRecordsData(playerID, teamID, isFull, data)
+	local entry = allyQueues[playerID]
+	if isFull or not entry then
+		entry = {teamID = teamID, jobs = {}, updatedAt = os.clock()}
+		allyQueues[playerID] = entry
+	end
+	entry.teamID = teamID
+	entry.updatedAt = os.clock()
+
+	for record in data:gmatch("([^;]+);") do
+		local op, hash, job = DecodeRecord(record)
+		if op == "U" then
+			entry.jobs[hash] = job
+		elseif op == "R" then
+			entry.jobs[hash] = nil
+		end
+	end
+end
 
 function widget:RecvLuaMsg(msg, playerID)
 	if playerID == myPlayerID then
@@ -213,15 +291,16 @@ function widget:RecvLuaMsg(msg, playerID)
 		return
 	end
 
-	local seqStr, idxStr, countStr, data = msg:sub(#MSG_PREFIX + 1):match("^(%d+)|(%d+)|(%d+)|(.*)$")
-	if not seqStr then
+	local typeChar, seqStr, idxStr, countStr, data =
+		msg:sub(#MSG_PREFIX + 1):match("^(%a)|(%d+)|(%d+)|(%d+)|(.*)$")
+	if not typeChar then
 		return
 	end
 	local seq, idx, count = tonumber(seqStr), tonumber(idxStr), tonumber(countStr)
 
 	local pending = pendingChunks[playerID]
 	if not pending or pending.seq ~= seq then
-		pending = {seq = seq, count = count, parts = {}, received = 0}
+		pending = {type = typeChar, seq = seq, count = count, parts = {}, received = 0}
 		pendingChunks[playerID] = pending
 	end
 	if not pending.parts[idx] then
@@ -233,11 +312,7 @@ function widget:RecvLuaMsg(msg, playerID)
 		pendingChunks[playerID] = nil
 		local fullData = table.concat(pending.parts, "", 1, pending.count)
 		local _, _, _, teamID = spGetPlayerInfo(playerID, false)
-		allyQueues[playerID] = {
-			teamID = teamID,
-			jobs = DecodeJobsData(fullData),
-			updatedAt = os.clock(),
-		}
+		ApplyRecordsData(playerID, teamID, pending.type == "F", fullData)
 	end
 end
 
@@ -246,12 +321,16 @@ end
 -- Update / Expiry -------------------------------------------------------------
 
 function widget:Update(dt)
-	if localRev ~= lastSentRev then
-		sendTimer = sendTimer + dt
-		if sendTimer >= SEND_INTERVAL then
-			sendTimer = 0
-			BroadcastLocalQueue()
-		end
+	deltaTimer = deltaTimer + dt
+	resyncTimer = resyncTimer + dt
+
+	if resyncTimer >= RESYNC_INTERVAL then
+		resyncTimer = 0
+		deltaTimer = 0
+		BroadcastFull()
+	elseif deltaTimer >= DELTA_INTERVAL then
+		deltaTimer = 0
+		BroadcastDeltaIfChanged()
 	end
 
 	local now = os.clock()
@@ -307,9 +386,7 @@ function widget:DrawWorldPreUnit()
 
 	glLineWidth(2)
 	for playerID, data in pairs(allyQueues) do
-		local jobs = data.jobs
-		for i = 1, #jobs do
-			local job = jobs[i]
+		for hash, job in pairs(data.jobs) do
 			if job.id < 0 then -- build job outline
 				if spIsAABBInView(job.x-1, job.y-1, job.z-1, job.x+1, job.y+1, job.z+1) then
 					glColor(1.0, 0.5, 0.1, 1)
@@ -342,9 +419,7 @@ function widget:DrawWorld()
 	glColor(1, 1, 1, 0.4)
 	for playerID, data in pairs(allyQueues) do
 		local teamID = data.teamID
-		local jobs = data.jobs
-		for i = 1, #jobs do
-			local job = jobs[i]
+		for hash, job in pairs(data.jobs) do
 			if job.id < 0 then -- build job ghost
 				local unitDefID = -job.id
 				if spIsAABBInView(job.x-1, job.y-1, job.z-1, job.x+1, job.y+1, job.z+1) then
@@ -362,9 +437,7 @@ function widget:DrawWorld()
 
 	glColor(1, 1, 1, 0.7)
 	for playerID, data in pairs(allyQueues) do
-		local jobs = data.jobs
-		for i = 1, #jobs do
-			local job = jobs[i]
+		for hash, job in pairs(data.jobs) do
 			if job.id >= 0 and job.target then -- single-target repair/reclaim/resurrect
 				local x, y, z
 				if job.target >= Game.maxUnits then
@@ -397,16 +470,17 @@ end
 -- Public API ------------------------------------------------------------------
 
 -- To be called (later, from unit_global_build_command.lua or similar) whenever
--- the caller's own build queue changes. `jobs` may be an array of job tables,
--- or a dict keyed however the caller likes (only the values are used) - see the
--- field documentation for the network protocol above for the job table format.
+-- the caller's own build queue changes, or once with a live table reference
+-- that the caller keeps mutating in place (eg. GBC's own buildQueue) - either
+-- way works, since this widget only reads from `jobs` on its own timer rather
+-- than reacting to the call itself.
+--
+-- `jobs` must be a dict keyed by a stable per-job identifier that stays the
+-- same for the same logical job across calls (GBC's own buildQueue is already
+-- keyed exactly this way, by BuildHash(cmd)), mapping to a job table with the
+-- fields documented in the network protocol comment above.
 local function SetLocalQueue(jobs)
-	local newJobs = {}
-	for _, job in pairs(jobs or {}) do
-		newJobs[#newJobs+1] = job
-	end
-	localJobs = newJobs
-	localRev = localRev + 1
+	localJobs = jobs or {}
 end
 
 function widget:Initialize()
