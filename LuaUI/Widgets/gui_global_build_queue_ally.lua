@@ -3,11 +3,10 @@
 --
 --  file:    gui_global_build_queue_ally.lua
 --  brief:   Shows allied players' (and, for spectators, everyone's) Global Build
---           Command queue jobs, and lets your own workers help build them.
+--           Command queue jobs.
 --
 --  Unlike "Global Build Command" itself, this widget is on by default: it only
---  displays information and gives a convenience order to your own units, it
---  never touches anyone else's units or takes control away from the player.
+--  displays information, and never touches anyone's units.
 --
 --  Note: This widget currently has nothing to display, because nothing calls
 --  WG.GlobalBuildQueueShare.SetLocalQueue() yet. That hookup into
@@ -21,20 +20,18 @@
 function widget:GetInfo()
 	return {
 		name      = "Global Build Queue (Ally View)",
-		desc      = "Shows allied players' Global Build Command queues (and, for spectators, every player's), and lets you assist them. Hold \255\200\200\200Ctrl+B\255\255\255\255 with workers selected and your cursor over a job to send them to help. Off screen unless something calls the SetLocalQueue API.",
+		desc      = "Shows allied players' Global Build Command queues (and, for spectators, every player's). Nothing to see yet unless something calls the SetLocalQueue API.",
 		author    = "amnykon",
 		date      = "September 25, 2026",
 		license   = "GNU GPL, v2 or later",
 		layer     = 11, -- after unit_global_build_command.lua's own drawing (layer 10)
-		enabled   = true, -- on by default, since it's pure information + a convenience order for your own units
+		enabled   = true, -- on by default, since it's pure information
 	}
 end
 
 --------------------------------------------------------------------------------
 --------------------------------------------------------------------------------
 -- Options -----------------------------------------------------------------
-
-include("keysym.lua")
 
 options_path = 'Settings/Unit Behaviour/Worker AI'
 options_order = {
@@ -57,17 +54,12 @@ options = {
 local spGetMyPlayerID       = Spring.GetMyPlayerID
 local spGetPlayerInfo       = Spring.GetPlayerInfo
 local spSendLuaUIMsg        = Spring.SendLuaUIMsg
-local spGetSelectedUnits    = Spring.GetSelectedUnits
-local spGetUnitDefID        = Spring.GetUnitDefID
 local spGetUnitPosition     = Spring.GetUnitPosition
 local spGetFeaturePosition  = Spring.GetFeaturePosition
 local spValidUnitID         = Spring.ValidUnitID
 local spValidFeatureID      = Spring.ValidFeatureID
-local spGiveOrderToUnit     = Spring.GiveOrderToUnit
 local spIsGUIHidden         = Spring.IsGUIHidden
 local spGetModKeyState      = Spring.GetModKeyState
-local spGetMouseState       = Spring.GetMouseState
-local spTraceScreenRay      = Spring.TraceScreenRay
 local spIsAABBInView        = Spring.IsAABBInView
 local spIsSphereInView      = Spring.IsSphereInView
 
@@ -93,7 +85,6 @@ local CMD_RECLAIM   = CMD.RECLAIM
 local CMD_RESURRECT = CMD.RESURRECT
 
 local floor = math.floor
-local sqrt = math.sqrt
 
 -- Zero-K specific icons, matching unit_global_build_command.lua's own job icons.
 local rep_icon = "LuaUI/Images/commands/Bold/repair.png"
@@ -117,8 +108,6 @@ local MSG_PREFIX = "GBCQ|"
 local MAX_CHUNK_DATA_LEN = 800
 local SEND_INTERVAL = 1.0 -- seconds between broadcasts of a changed queue
 local EXPIRE_TIME = 6.0 -- seconds without an update before we drop a player's queue
-local ASSIST_KEY = KEYSYMS.B
-local ASSIST_RADIUS = 150 -- elmos; how close the cursor must be to a job to assist it
 
 local myPlayerID = spGetMyPlayerID()
 
@@ -401,88 +390,6 @@ function widget:DrawWorld()
 
 	glTexture(false)
 	glColor(1, 1, 1, 1)
-end
-
---------------------------------------------------------------------------------
---------------------------------------------------------------------------------
--- Assist (the "possibly build" part) ------------------------------------------
-
--- Finds the closest known ally job to a ground point, within ASSIST_RADIUS.
-local function FindNearestJob(cx, cz)
-	local bestJob, bestDist = nil, ASSIST_RADIUS
-	for playerID, data in pairs(allyQueues) do
-		local jobs = data.jobs
-		for i = 1, #jobs do
-			local job = jobs[i]
-			local jx, jz = job.x, job.z
-			if job.id >= 0 and job.target then
-				if job.target >= Game.maxUnits then
-					if spValidFeatureID(job.target - Game.maxUnits) then
-						local fx, _, fz = spGetFeaturePosition(job.target - Game.maxUnits)
-						jx, jz = fx or jx, fz or jz
-					end
-				elseif spValidUnitID(job.target) then
-					local ux, _, uz = spGetUnitPosition(job.target)
-					jx, jz = ux or jx, uz or jz
-				end
-			end
-			local dx, dz = jx - cx, jz - cz
-			local dist = sqrt(dx*dx + dz*dz)
-			if dist < bestDist then
-				bestJob, bestDist = job, dist
-			end
-		end
-	end
-	return bestJob
-end
-
--- Gives one of our own mobile builders the same order as the given job.
-local function AssistJob(unitID, job, giveOptions)
-	if job.id < 0 then
-		spGiveOrderToUnit(unitID, job.id, {job.x, job.y, job.z, job.h or 0}, giveOptions)
-	elseif job.target then
-		spGiveOrderToUnit(unitID, job.id, {job.target}, giveOptions)
-	else
-		spGiveOrderToUnit(unitID, job.id, {job.x, job.y, job.z, job.r or 0}, giveOptions)
-	end
-end
-
-local function AssistNearestJob()
-	local mx, my = spGetMouseState()
-	local _, pos = spTraceScreenRay(mx, my, true)
-	if not pos then
-		return
-	end
-	local job = FindNearestJob(pos[1], pos[3])
-	if not job then
-		return
-	end
-
-	local alt, ctrl, meta, shift = spGetModKeyState()
-	local giveOptions = shift and CMD.OPT_SHIFT or 0
-
-	local units = spGetSelectedUnits()
-	local gaveOrder = false
-	for i = 1, #units do
-		local unitID = units[i]
-		local ud = UnitDefs[spGetUnitDefID(unitID)]
-		if ud and ud.isMobileBuilder then
-			AssistJob(unitID, job, giveOptions)
-			gaveOrder = true
-		end
-	end
-	if gaveOrder and WG.sounds_gaveOrderToUnit then
-		WG.sounds_gaveOrderToUnit(units[1])
-	end
-end
-
-function widget:KeyPress(key, modifier, isRepeat)
-	if isRepeat then
-		return
-	end
-	if key == ASSIST_KEY and modifier.ctrl and not modifier.alt and not modifier.meta then
-		AssistNearestJob()
-	end
 end
 
 --------------------------------------------------------------------------------
