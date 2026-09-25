@@ -158,6 +158,18 @@ local function EncodeRemove(hash)
 	return "R," .. hash .. ";"
 end
 
+-- A snapshot of just the fields we care about. Callers such as GBC mutate
+-- their command tables in place (eg. updating a "workers assigned" count on
+-- the same table), so lastSentJobs must not hold onto the caller's live
+-- table by reference - if it did, a later in-place edit would silently
+-- change what we think we already sent, and we'd never broadcast the update.
+local function SnapshotJob(job)
+	return {
+		id = job.id, x = job.x, y = job.y, z = job.z,
+		h = job.h, r = job.r, target = job.target, workers = job.workers,
+	}
+end
+
 -- Returns op ("U" or "R"), hash, and (for "U") the decoded job table.
 local function DecodeRecord(record)
 	local op, rest = record:match("^(%a),(.*)$")
@@ -224,9 +236,17 @@ local function BroadcastFull()
 	end
 	SendBatch("F", records)
 
-	lastSentJobs = {}
+	-- Reset the baseline to exactly match localJobs, mutating lastSentJobs in
+	-- place rather than discarding and reallocating it (clearing an existing
+	-- field mid-traversal is safe per the Lua manual; adding a new one isn't,
+	-- which is why the two loops below stay separate).
+	for hash in pairs(lastSentJobs) do
+		if not localJobs[hash] then
+			lastSentJobs[hash] = nil
+		end
+	end
 	for hash, job in pairs(localJobs) do
-		lastSentJobs[hash] = job
+		lastSentJobs[hash] = SnapshotJob(job)
 	end
 end
 
@@ -235,29 +255,31 @@ local function JobsEqual(a, b)
 		and a.h == b.h and a.r == b.r and a.target == b.target and a.workers == b.workers
 end
 
+-- `records` is only allocated once we know there's actually something to
+-- send, since most ticks have no changes at all.
 local function BroadcastDeltaIfChanged()
-	local records = {}
+	local records
+
 	for hash in pairs(lastSentJobs) do
 		if not localJobs[hash] then
+			records = records or {}
 			records[#records+1] = EncodeRemove(hash)
+			lastSentJobs[hash] = nil
 		end
 	end
 	for hash, job in pairs(localJobs) do
 		local prev = lastSentJobs[hash]
 		if not prev or not JobsEqual(prev, job) then
+			records = records or {}
 			records[#records+1] = EncodeUpsert(hash, job)
+			lastSentJobs[hash] = SnapshotJob(job)
 		end
 	end
 
-	if #records == 0 then
+	if not records then
 		return
 	end
 	SendBatch("D", records)
-
-	lastSentJobs = {}
-	for hash, job in pairs(localJobs) do
-		lastSentJobs[hash] = job
-	end
 end
 
 --------------------------------------------------------------------------------
