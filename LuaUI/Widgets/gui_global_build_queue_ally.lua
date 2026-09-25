@@ -125,32 +125,74 @@ local EXPIRE_TIME = 3 * RESYNC_INTERVAL -- time without any update before we dro
 
 local myPlayerID = spGetMyPlayerID()
 
--- Our own queue, as given to us through the public API (see bottom of file).
--- Keyed by a stable per-job hash, exactly like GBC's own buildQueue table.
-local localJobs = {}
-local lastSentJobs = {} -- what we last told everyone we have, keyed the same way
+-- Job data is stored as a separate flat dictionary per field (a "struct of
+-- arrays"), each keyed by job id, instead of one dictionary of small per-job
+-- tables. Lots of small short-lived tables is exactly the kind of thing that
+-- produces needless garbage-collector pressure in Lua; a handful of flat
+-- dictionaries of plain numbers avoids that, at the cost of more repetitive
+-- code around them.
+
+-- Our own queue, as given to us through the public API (see bottom of file),
+-- keyed by a stable per-job hash (see SetLocalQueue for where this comes from).
+local localJobId = {}
+local localJobX = {}
+local localJobY = {}
+local localJobZ = {}
+local localJobH = {}
+local localJobR = {}
+local localJobTarget = {}
+local localJobWorkers = {}
+
+-- What we last told everyone we have - the diff baseline - same layout as
+-- the localJob* set above, and always keyed the same way (by hash).
+local sentJobId = {}
+local sentJobX = {}
+local sentJobY = {}
+local sentJobZ = {}
+local sentJobH = {}
+local sentJobR = {}
+local sentJobTarget = {}
+local sentJobWorkers = {}
+
 local sendSeq = 0 -- transfer id for the chunked messages we send
 local deltaTimer = 0
 local resyncTimer = 0
 
--- Other players' queues, as received over the network.
-local allyQueues = {} -- allyQueues[playerID] = {teamID=, jobs={[hash]=job}, updatedAt=os.clock()}
+-- Other players' queues, as received over the network. Every sender shares
+-- the same flat dictionaries, keyed by "<playerID>#<hash>" rather than by
+-- hash alone, since two different players can otherwise end up with the
+-- exact same hash (eg. both queuing the same building at the same spot) and
+-- would then collide into a single entry.
+local jobId = {}
+local jobX = {}
+local jobY = {}
+local jobZ = {}
+local jobH = {}
+local jobR = {}
+local jobTarget = {}
+local jobWorkers = {}
+local jobOwner = {} -- jobOwner[key] = the owning playerID
+
+-- Per-player bookkeeping. This is naturally one entry per player rather than
+-- per job, so it stays as small dictionaries.
+local ownerTeamID = {}
+local ownerUpdatedAt = {}
 local pendingChunks = {} -- pendingChunks[playerID] = {type=, seq=, count=, parts={}, received=}
 
 --------------------------------------------------------------------------------
 --------------------------------------------------------------------------------
 -- Encoding / Decoding ---------------------------------------------------------
 
-local function EncodeUpsert(hash, job)
+local function EncodeUpsert(hash, id, x, y, z, h, r, target, workers)
 	return "U," .. hash .. ","
-		.. (job.id or 0) .. ","
-		.. floor(job.x or 0) .. ","
-		.. floor(job.y or 0) .. ","
-		.. floor(job.z or 0) .. ","
-		.. (job.h and floor(job.h) or "") .. ","
-		.. (job.r and floor(job.r) or "") .. ","
-		.. (job.target and floor(job.target) or "") .. ","
-		.. (job.workers and floor(job.workers) or "")
+		.. (id or 0) .. ","
+		.. floor(x or 0) .. ","
+		.. floor(y or 0) .. ","
+		.. floor(z or 0) .. ","
+		.. (h and floor(h) or "") .. ","
+		.. (r and floor(r) or "") .. ","
+		.. (target and floor(target) or "") .. ","
+		.. (workers and floor(workers) or "")
 		.. ";"
 end
 
@@ -158,19 +200,9 @@ local function EncodeRemove(hash)
 	return "R," .. hash .. ";"
 end
 
--- A snapshot of just the fields we care about. Callers such as GBC mutate
--- their command tables in place (eg. updating a "workers assigned" count on
--- the same table), so lastSentJobs must not hold onto the caller's live
--- table by reference - if it did, a later in-place edit would silently
--- change what we think we already sent, and we'd never broadcast the update.
-local function SnapshotJob(job)
-	return {
-		id = job.id, x = job.x, y = job.y, z = job.z,
-		h = job.h, r = job.r, target = job.target, workers = job.workers,
-	}
-end
-
--- Returns op ("U" or "R"), hash, and (for "U") the decoded job table.
+-- Returns op ("U" or "R"), hash, and (for "U") the decoded scalar fields -
+-- deliberately not packed into a job table, to avoid allocating one per
+-- record decoded.
 local function DecodeRecord(record)
 	local op, rest = record:match("^(%a),(.*)$")
 	if op == "R" then
@@ -181,14 +213,12 @@ local function DecodeRecord(record)
 		if not hash then
 			return nil
 		end
-		return "U", hash, {
-			id = tonumber(id),
-			x = tonumber(x), y = tonumber(y), z = tonumber(z),
-			h = (h ~= "") and tonumber(h) or nil,
-			r = (r ~= "") and tonumber(r) or nil,
-			target = (target ~= "") and tonumber(target) or nil,
-			workers = (workers ~= "") and tonumber(workers) or nil,
-		}
+		return "U", hash,
+			tonumber(id), tonumber(x), tonumber(y), tonumber(z),
+			(h ~= "") and tonumber(h) or nil,
+			(r ~= "") and tonumber(r) or nil,
+			(target ~= "") and tonumber(target) or nil,
+			(workers ~= "") and tonumber(workers) or nil
 	end
 	return nil
 end
@@ -229,50 +259,82 @@ local function SendBatch(typeChar, records)
 	end
 end
 
+local function EncodeLocalUpsert(hash)
+	return EncodeUpsert(hash, localJobId[hash], localJobX[hash], localJobY[hash], localJobZ[hash],
+		localJobH[hash], localJobR[hash], localJobTarget[hash], localJobWorkers[hash])
+end
+
+local function CopyLocalJobToSent(hash)
+	sentJobId[hash] = localJobId[hash]
+	sentJobX[hash] = localJobX[hash]
+	sentJobY[hash] = localJobY[hash]
+	sentJobZ[hash] = localJobZ[hash]
+	sentJobH[hash] = localJobH[hash]
+	sentJobR[hash] = localJobR[hash]
+	sentJobTarget[hash] = localJobTarget[hash]
+	sentJobWorkers[hash] = localJobWorkers[hash]
+end
+
+local function ClearSentJob(hash)
+	sentJobId[hash] = nil
+	sentJobX[hash] = nil
+	sentJobY[hash] = nil
+	sentJobZ[hash] = nil
+	sentJobH[hash] = nil
+	sentJobR[hash] = nil
+	sentJobTarget[hash] = nil
+	sentJobWorkers[hash] = nil
+end
+
+local function LocalJobChanged(hash)
+	return sentJobId[hash] == nil
+		or sentJobId[hash] ~= localJobId[hash]
+		or sentJobX[hash] ~= localJobX[hash]
+		or sentJobY[hash] ~= localJobY[hash]
+		or sentJobZ[hash] ~= localJobZ[hash]
+		or sentJobH[hash] ~= localJobH[hash]
+		or sentJobR[hash] ~= localJobR[hash]
+		or sentJobTarget[hash] ~= localJobTarget[hash]
+		or sentJobWorkers[hash] ~= localJobWorkers[hash]
+end
+
 local function BroadcastFull()
 	local records = {}
-	for hash, job in pairs(localJobs) do
-		records[#records+1] = EncodeUpsert(hash, job)
+	for hash in pairs(localJobId) do
+		records[#records+1] = EncodeLocalUpsert(hash)
 	end
 	SendBatch("F", records)
 
-	-- Reset the baseline to exactly match localJobs, mutating lastSentJobs in
-	-- place rather than discarding and reallocating it (clearing an existing
-	-- field mid-traversal is safe per the Lua manual; adding a new one isn't,
-	-- which is why the two loops below stay separate).
-	for hash in pairs(lastSentJobs) do
-		if not localJobs[hash] then
-			lastSentJobs[hash] = nil
+	-- Reset the baseline to exactly match localJob*, mutating sentJob* in
+	-- place (clearing an existing field mid-traversal is safe per the Lua
+	-- manual; adding a new one isn't, which is why these stay separate loops).
+	for hash in pairs(sentJobId) do
+		if not localJobId[hash] then
+			ClearSentJob(hash)
 		end
 	end
-	for hash, job in pairs(localJobs) do
-		lastSentJobs[hash] = SnapshotJob(job)
+	for hash in pairs(localJobId) do
+		CopyLocalJobToSent(hash)
 	end
 end
 
-local function JobsEqual(a, b)
-	return a.id == b.id and a.x == b.x and a.y == b.y and a.z == b.z
-		and a.h == b.h and a.r == b.r and a.target == b.target and a.workers == b.workers
-end
-
--- `records` is only allocated once we know there's actually something to
--- send, since most ticks have no changes at all.
+-- The records list is only allocated once we know there's actually something
+-- to send, since most ticks have no changes at all.
 local function BroadcastDeltaIfChanged()
 	local records
 
-	for hash in pairs(lastSentJobs) do
-		if not localJobs[hash] then
+	for hash in pairs(sentJobId) do
+		if not localJobId[hash] then
 			records = records or {}
 			records[#records+1] = EncodeRemove(hash)
-			lastSentJobs[hash] = nil
+			ClearSentJob(hash)
 		end
 	end
-	for hash, job in pairs(localJobs) do
-		local prev = lastSentJobs[hash]
-		if not prev or not JobsEqual(prev, job) then
+	for hash in pairs(localJobId) do
+		if LocalJobChanged(hash) then
 			records = records or {}
-			records[#records+1] = EncodeUpsert(hash, job)
-			lastSentJobs[hash] = SnapshotJob(job)
+			records[#records+1] = EncodeLocalUpsert(hash)
+			CopyLocalJobToSent(hash)
 		end
 	end
 
@@ -286,21 +348,55 @@ end
 --------------------------------------------------------------------------------
 -- Receiving -----------------------------------------------------------------
 
+local function ClearReceivedJob(key)
+	jobId[key] = nil
+	jobX[key] = nil
+	jobY[key] = nil
+	jobZ[key] = nil
+	jobH[key] = nil
+	jobR[key] = nil
+	jobTarget[key] = nil
+	jobWorkers[key] = nil
+	jobOwner[key] = nil
+end
+
 local function ApplyRecordsData(playerID, teamID, isFull, data)
-	local entry = allyQueues[playerID]
-	if isFull or not entry then
-		entry = {teamID = teamID, jobs = {}, updatedAt = os.clock()}
-		allyQueues[playerID] = entry
-	end
-	entry.teamID = teamID
-	entry.updatedAt = os.clock()
+	ownerTeamID[playerID] = teamID
+	ownerUpdatedAt[playerID] = os.clock()
+
+	-- For a full snapshot, track which keys it mentions so we can prune
+	-- anything else already stored for this owner (eg. a job they had before
+	-- but have since finished/cancelled without us seeing the delta for it).
+	local newKeys = isFull and {} or nil
 
 	for record in data:gmatch("([^;]+);") do
-		local op, hash, job = DecodeRecord(record)
-		if op == "U" then
-			entry.jobs[hash] = job
-		elseif op == "R" then
-			entry.jobs[hash] = nil
+		local op, hash, id, x, y, z, h, r, target, workers = DecodeRecord(record)
+		if op then
+			local key = playerID .. "#" .. hash
+			if op == "U" then
+				jobId[key] = id
+				jobX[key] = x
+				jobY[key] = y
+				jobZ[key] = z
+				jobH[key] = h
+				jobR[key] = r
+				jobTarget[key] = target
+				jobWorkers[key] = workers
+				jobOwner[key] = playerID
+				if newKeys then
+					newKeys[key] = true
+				end
+			elseif op == "R" then
+				ClearReceivedJob(key)
+			end
+		end
+	end
+
+	if newKeys then
+		for key, owner in pairs(jobOwner) do
+			if owner == playerID and not newKeys[key] then
+				ClearReceivedJob(key)
+			end
 		end
 	end
 end
@@ -356,9 +452,15 @@ function widget:Update(dt)
 	end
 
 	local now = os.clock()
-	for playerID, data in pairs(allyQueues) do
-		if now - data.updatedAt > EXPIRE_TIME then
-			allyQueues[playerID] = nil
+	for playerID, updatedAt in pairs(ownerUpdatedAt) do
+		if now - updatedAt > EXPIRE_TIME then
+			ownerUpdatedAt[playerID] = nil
+			ownerTeamID[playerID] = nil
+			for key, owner in pairs(jobOwner) do
+				if owner == playerID then
+					ClearReceivedJob(key)
+				end
+			end
 		end
 	end
 end
@@ -407,24 +509,24 @@ function widget:DrawWorldPreUnit()
 	end
 
 	glLineWidth(2)
-	for playerID, data in pairs(allyQueues) do
-		for hash, job in pairs(data.jobs) do
-			if job.id < 0 then -- build job outline
-				if spIsAABBInView(job.x-1, job.y-1, job.z-1, job.x+1, job.y+1, job.z+1) then
-					glColor(1.0, 0.5, 0.1, 1)
-					glBeginEnd(GL_LINE_STRIP, DrawOutline, -job.id, job.x, job.y, job.z, job.h or 0)
+	for key, id in pairs(jobId) do
+		local x, y, z = jobX[key], jobY[key], jobZ[key]
+		if id < 0 then -- build job outline
+			if spIsAABBInView(x-1, y-1, z-1, x+1, y+1, z+1) then
+				glColor(1.0, 0.5, 0.1, 1)
+				glBeginEnd(GL_LINE_STRIP, DrawOutline, -id, x, y, z, jobH[key] or 0)
+			end
+		elseif not jobTarget[key] then -- area job circle
+			local r = jobR[key] or 0
+			if spIsSphereInView(x, y, z, r+25) then
+				if id == CMD_REPAIR then
+					glColor(rep_color)
+				elseif id == CMD_RECLAIM then
+					glColor(rec_color)
+				else
+					glColor(res_color)
 				end
-			elseif not job.target then -- area job circle
-				if spIsSphereInView(job.x, job.y, job.z, (job.r or 0)+25) then
-					if job.id == CMD_REPAIR then
-						glColor(rep_color)
-					elseif job.id == CMD_RECLAIM then
-						glColor(rec_color)
-					else
-						glColor(res_color)
-					end
-					glGroundCircle(job.x, job.y, job.z, job.r or 0, 32)
-				end
+				glGroundCircle(x, y, z, r, 32)
 			end
 		end
 	end
@@ -439,45 +541,42 @@ function widget:DrawWorld()
 
 	glDepthTest(true)
 	glColor(1, 1, 1, 0.4)
-	for playerID, data in pairs(allyQueues) do
-		local teamID = data.teamID
-		for hash, job in pairs(data.jobs) do
-			if job.id < 0 then -- build job ghost
-				local unitDefID = -job.id
-				if spIsAABBInView(job.x-1, job.y-1, job.z-1, job.x+1, job.y+1, job.z+1) then
-					glPushMatrix()
-					glLoadIdentity()
-					glTranslate(job.x, job.y, job.z)
-					glRotate((job.h or 0) * 90, 0, 1.0, 0)
-					glUnitShape(unitDefID, teamID, false, false, false)
-					glPopMatrix()
-				end
+	for key, id in pairs(jobId) do
+		if id < 0 then -- build job ghost
+			local x, y, z, h = jobX[key], jobY[key], jobZ[key], jobH[key] or 0
+			if spIsAABBInView(x-1, y-1, z-1, x+1, y+1, z+1) then
+				local teamID = ownerTeamID[jobOwner[key]]
+				glPushMatrix()
+				glLoadIdentity()
+				glTranslate(x, y, z)
+				glRotate(h * 90, 0, 1.0, 0)
+				glUnitShape(-id, teamID, false, false, false)
+				glPopMatrix()
 			end
 		end
 	end
 	glDepthTest(false)
 
 	glColor(1, 1, 1, 0.7)
-	for playerID, data in pairs(allyQueues) do
-		for hash, job in pairs(data.jobs) do
-			if job.id >= 0 and job.target then -- single-target repair/reclaim/resurrect
-				local x, y, z
-				if job.target >= Game.maxUnits then
-					if spValidFeatureID(job.target - Game.maxUnits) then
-						x, y, z = spGetFeaturePosition(job.target - Game.maxUnits)
-					end
-				elseif spValidUnitID(job.target) then
-					x, y, z = spGetUnitPosition(job.target)
+	for key, id in pairs(jobId) do
+		local target = jobTarget[key]
+		if id >= 0 and target then -- single-target repair/reclaim/resurrect
+			local x, y, z
+			if target >= Game.maxUnits then
+				if spValidFeatureID(target - Game.maxUnits) then
+					x, y, z = spGetFeaturePosition(target - Game.maxUnits)
 				end
-				x, y, z = x or job.x, y or job.y, z or job.z
-				if x and spIsSphereInView(x, y, z, 100) then
-					if job.id == CMD_REPAIR then
-						DrawIcon(rep_icon, x, y, z, 66)
-					elseif job.id == CMD_RECLAIM then
-						DrawIcon(rec_icon, x, y, z, 66)
-					else
-						DrawIcon(res_icon, x, y, z, 66)
-					end
+			elseif spValidUnitID(target) then
+				x, y, z = spGetUnitPosition(target)
+			end
+			x, y, z = x or jobX[key], y or jobY[key], z or jobZ[key]
+			if x and spIsSphereInView(x, y, z, 100) then
+				if id == CMD_REPAIR then
+					DrawIcon(rep_icon, x, y, z, 66)
+				elseif id == CMD_RECLAIM then
+					DrawIcon(rec_icon, x, y, z, 66)
+				else
+					DrawIcon(res_icon, x, y, z, 66)
 				end
 			end
 		end
@@ -491,18 +590,44 @@ end
 --------------------------------------------------------------------------------
 -- Public API ------------------------------------------------------------------
 
--- To be called (later, from unit_global_build_command.lua or similar) whenever
--- the caller's own build queue changes, or once with a live table reference
--- that the caller keeps mutating in place (eg. GBC's own buildQueue) - either
--- way works, since this widget only reads from `jobs` on its own timer rather
--- than reacting to the call itself.
+local function ClearLocalJob(hash)
+	localJobId[hash] = nil
+	localJobX[hash] = nil
+	localJobY[hash] = nil
+	localJobZ[hash] = nil
+	localJobH[hash] = nil
+	localJobR[hash] = nil
+	localJobTarget[hash] = nil
+	localJobWorkers[hash] = nil
+end
+
+-- To be called (later, from unit_global_build_command.lua or similar) every
+-- time the caller's own build queue changes. Unlike a live table reference,
+-- this copies the given fields out immediately into our own flat per-field
+-- dictionaries, so call it again whenever anything changes rather than
+-- expecting us to notice an in-place edit to a table you handed us earlier.
 --
 -- `jobs` must be a dict keyed by a stable per-job identifier that stays the
 -- same for the same logical job across calls (GBC's own buildQueue is already
 -- keyed exactly this way, by BuildHash(cmd)), mapping to a job table with the
 -- fields documented in the network protocol comment above.
 local function SetLocalQueue(jobs)
-	localJobs = jobs or {}
+	jobs = jobs or {}
+	for hash in pairs(localJobId) do
+		if not jobs[hash] then
+			ClearLocalJob(hash)
+		end
+	end
+	for hash, job in pairs(jobs) do
+		localJobId[hash] = job.id
+		localJobX[hash] = job.x
+		localJobY[hash] = job.y
+		localJobZ[hash] = job.z
+		localJobH[hash] = job.h
+		localJobR[hash] = job.r
+		localJobTarget[hash] = job.target
+		localJobWorkers[hash] = job.workers
+	end
 end
 
 function widget:Initialize()
