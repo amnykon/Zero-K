@@ -54,7 +54,6 @@ options = {
 
 -- "Localized" API calls, because they run ~33% faster in lua.
 local spGetMyPlayerID       = Spring.GetMyPlayerID
-local spGetMyTeamID         = Spring.GetMyTeamID
 local spGetPlayerInfo       = Spring.GetPlayerInfo
 local spSendLuaUIMsg        = Spring.SendLuaUIMsg
 local spGetUnitPosition     = Spring.GetUnitPosition
@@ -195,13 +194,6 @@ local pendingStatus = {}
 -- changed our own worker count on since the last send. Populated by
 -- AssistJob() and drained by BroadcastPending() alongside pendingStatus.
 local pendingAssist = {}
-
--- Per-player bookkeeping. This is naturally one entry per player rather than
--- per job, so it stays as a small dictionary. Gets one entry for us too (set
--- once in widget:Initialize()), purely so our own ghost buildings can use the
--- same ownerTeamID[jobOwner[key]] lookup as everyone else's rather than a
--- special case.
-local ownerTeamID = {}
 
 --------------------------------------------------------------------------------
 --------------------------------------------------------------------------------
@@ -391,9 +383,7 @@ local function ClearJob(key)
 	end
 end
 
-local function ApplyRecordsData(playerID, teamID, data)
-	ownerTeamID[playerID] = teamID
-
+local function ApplyRecordsData(playerID, data)
 	for record in data:gmatch("([^;]+);") do
 		local op, rest = DecodeRecord(record)
 		if op == "U" then
@@ -434,8 +424,7 @@ function widget:RecvLuaMsg(msg, playerID)
 		return
 	end
 
-	local _, _, _, teamID = spGetPlayerInfo(playerID, false)
-	ApplyRecordsData(playerID, teamID, rest)
+	ApplyRecordsData(playerID, rest)
 end
 
 -- Precise, event-driven cleanup instead of a timeout: a player's queue stops
@@ -445,7 +434,6 @@ end
 -- a player who simply hasn't changed their queue in a while is never
 -- mistaken for one who's gone.
 local function ClearPlayerJobs(playerID)
-	ownerTeamID[playerID] = nil
 	for key, owner in pairs(jobOwner) do
 		if owner == playerID then
 			ClearJob(key)
@@ -529,6 +517,25 @@ end
 -- only need one loop each over the whole table, rather than one loop per
 -- source.
 
+-- Ghost buildings are colored by player, not a teamID we'd have to keep
+-- correct ourselves - the same GetPlayerInfo(...).team lookup GBC's own
+-- helpers elsewhere use for "this player's color", not a cached team we
+-- picked up whenever we last happened to receive something from them (which
+-- could otherwise go stale after a mid-game team change, since nothing here
+-- listens for widget:TeamChanged). `cache` is a plain table the caller
+-- creates fresh once per draw call and passes into every DrawJobGhost() this
+-- frame, so a player with many queued jobs only costs one real lookup, not
+-- one per job.
+local function GetOwnerTeamID(ownerPlayerID, cache)
+	local teamID = cache[ownerPlayerID]
+	if teamID == nil then
+		local _, _, _, t = spGetPlayerInfo(ownerPlayerID, false)
+		teamID = t or false
+		cache[ownerPlayerID] = teamID
+	end
+	return teamID or nil
+end
+
 local function DrawJobOutline(cmdId, x, y, z, h, r, target)
 	if cmdId < 0 then -- build job outline
 		if spIsAABBInView(x-1, y-1, z-1, x+1, y+1, z+1) then
@@ -606,8 +613,9 @@ function widget:DrawWorld()
 
 	glDepthTest(true)
 	glColor(1, 1, 1, 0.4)
+	local teamIDCache = {}
 	for key, cmdIdValue in pairs(cmdId) do
-		DrawJobGhost(cmdIdValue, jobX[key], jobY[key], jobZ[key], jobH[key], ownerTeamID[jobOwner[key]])
+		DrawJobGhost(cmdIdValue, jobX[key], jobY[key], jobZ[key], jobH[key], GetOwnerTeamID(jobOwner[key], teamIDCache))
 	end
 	glDepthTest(false)
 
@@ -679,10 +687,6 @@ end
 
 function widget:Initialize()
 	myPlayerID = spGetMyPlayerID()
-	-- So our own ghost buildings get colored correctly by the same
-	-- ownerTeamID[jobOwner[key]] lookup used for everyone else's, without
-	-- special-casing "is this actually me" in the draw loop.
-	ownerTeamID[myPlayerID] = spGetMyTeamID()
 	-- Ask everyone else to (re-)send their current queue, since we won't have
 	-- seen any of the deltas from before we existed (eg. this widget just got
 	-- enabled mid-game).
