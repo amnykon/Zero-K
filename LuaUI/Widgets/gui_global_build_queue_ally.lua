@@ -135,34 +135,13 @@ local myPlayerID = spGetMyPlayerID()
 -- dictionaries of plain numbers avoids that, at the cost of more repetitive
 -- code around them.
 
--- Our own queue, as given to us through the public API (see bottom of file),
--- keyed by a stable per-job hash (see UpdateJob for where this comes from).
-local localCmdId = {}
-local localJobX = {}
-local localJobY = {}
-local localJobZ = {}
-local localJobH = {}
-local localJobR = {}
-local localJobTarget = {}
-local localJobWorkers = {}
-
--- Which hashes have changed since the last send, and how: true means
--- UpdateJob() was called (so local* already holds the new fields, ready to
--- encode), false means DeleteJob() was called. Populated directly by the
--- public API (see the bottom of this file) rather than by comparing local*
--- against a second full copy of itself every send tick - the caller already
--- knows exactly when something changed, so there's nothing to diff.
-local pendingStatus = {}
-
-local sendSeq = 0 -- transfer id for the chunked messages we send
-local deltaTimer = 0
-local resyncTimer = 0
-
--- Other players' queues, as received over the network. Every sender shares
--- the same flat dictionaries, keyed by "<playerID>#<hash>" rather than by
--- hash alone, since two different players can otherwise end up with the
--- exact same hash (eg. both queuing the same building at the same spot) and
--- would then collide into a single entry.
+-- Every player's queue - ours included - lives in this one set of
+-- dictionaries, keyed by "<playerID>#<hash>" rather than by hash alone,
+-- since two different players can otherwise end up with the exact same hash
+-- (eg. both queuing the same building at the same spot) and would then
+-- collide into a single entry. Our own entries (owner == myPlayerID) are
+-- written directly by UpdateJob/DeleteJob; everyone else's arrive over the
+-- network via RecvLuaMsg/ApplyRecordsData.
 local cmdId = {}
 local jobX = {}
 local jobY = {}
@@ -173,8 +152,28 @@ local jobTarget = {}
 local jobWorkers = {}
 local jobOwner = {} -- jobOwner[key] = the owning playerID
 
+-- Which of our own hashes have changed since the last send, and how: true
+-- means UpdateJob() was called (so the fields above already hold the new
+-- values, ready to encode), false means DeleteJob() was called. Populated
+-- directly by the public API (see the bottom of this file) rather than by
+-- comparing against a second full copy of our own data every send tick - the
+-- caller already knows exactly when something changed, so there's nothing to
+-- diff. Keyed by bare hash, not "<playerID>#<hash>", since it only ever
+-- tracks our own changes.
+local pendingStatus = {}
+
+local sendSeq = 0 -- transfer id for the chunked messages we send
+local deltaTimer = 0
+local resyncTimer = 0
+
 -- Per-player bookkeeping. This is naturally one entry per player rather than
--- per job, so it stays as small dictionaries.
+-- per job, so it stays as small dictionaries. ownerTeamID gets one entry for
+-- us too (set once in widget:Initialize(), purely so our own ghost buildings
+-- can use the same ownerTeamID[jobOwner[key]] lookup as everyone else's).
+-- ownerUpdatedAt never does, though: we don't send ourselves network
+-- messages, so only ApplyRecordsData (for other players) ever touches it -
+-- which conveniently also means the expiry sweep in widget:Update() can
+-- never mistake our own queue for a player who's gone quiet.
 local ownerTeamID = {}
 local ownerUpdatedAt = {}
 local pendingChunks = {} -- pendingChunks[playerID] = {type=, seq=, count=, parts={}, received=}
@@ -259,15 +258,25 @@ local function SendBatch(typeChar, records)
 	end
 end
 
+-- Reads back one of our own jobs by its bare hash, deriving the storage key
+-- the same way UpdateJob does.
 local function EncodeLocalUpsert(hash)
-	return EncodeUpsert(hash, localCmdId[hash], localJobX[hash], localJobY[hash], localJobZ[hash],
-		localJobH[hash], localJobR[hash], localJobTarget[hash], localJobWorkers[hash])
+	local key = myPlayerID .. "#" .. hash
+	return EncodeUpsert(hash, cmdId[key], jobX[key], jobY[key], jobZ[key],
+		jobH[key], jobR[key], jobTarget[key], jobWorkers[key])
 end
 
 local function BroadcastFull()
+	-- Scanning the whole (everyone's) table to find just our own entries
+	-- only happens here, on the infrequent (every RESYNC_INTERVAL) full
+	-- resync - not on the much more frequent BroadcastPending() path below,
+	-- which only ever touches pendingStatus.
+	local myKeyPrefix = myPlayerID .. "#"
 	local records = {}
-	for hash in pairs(localCmdId) do
-		records[#records+1] = EncodeLocalUpsert(hash)
+	for key, owner in pairs(jobOwner) do
+		if owner == myPlayerID then
+			records[#records+1] = EncodeLocalUpsert(key:sub(#myKeyPrefix + 1))
+		end
 	end
 	SendBatch("F", records)
 
@@ -304,7 +313,10 @@ end
 --------------------------------------------------------------------------------
 -- Receiving -----------------------------------------------------------------
 
-local function ClearReceivedJob(key)
+-- Clears one job by its full storage key ("<playerID>#<hash>"), whether it's
+-- ours or another player's - shared by DeleteJob() and the receiving code
+-- below.
+local function ClearJob(key)
 	cmdId[key] = nil
 	jobX[key] = nil
 	jobY[key] = nil
@@ -343,7 +355,7 @@ local function ApplyRecordsData(playerID, teamID, isFull, data)
 					newKeys[key] = true
 				end
 			elseif op == "R" then
-				ClearReceivedJob(key)
+				ClearJob(key)
 			end
 		end
 	end
@@ -351,7 +363,7 @@ local function ApplyRecordsData(playerID, teamID, isFull, data)
 	if newKeys then
 		for key, owner in pairs(jobOwner) do
 			if owner == playerID and not newKeys[key] then
-				ClearReceivedJob(key)
+				ClearJob(key)
 			end
 		end
 	end
@@ -414,7 +426,7 @@ function widget:Update(dt)
 			ownerTeamID[playerID] = nil
 			for key, owner in pairs(jobOwner) do
 				if owner == playerID then
-					ClearReceivedJob(key)
+					ClearJob(key)
 				end
 			end
 		end
@@ -459,11 +471,11 @@ local function ShouldShow()
 	return shift
 end
 
--- The three helpers below hold the actual GL drawing logic for one job, so
--- that our own queue (localCmdId/localJobX/...) and everyone else's queues
--- (cmdId/jobX/... keyed by "<playerID>#<hash>") can share it: they're stored
--- separately (see the comments where those dictionaries are declared), but
--- there's no reason the drawing code should be duplicated for each source.
+-- The three helpers below hold the actual GL drawing logic for one job. Since
+-- our own queue and everyone else's live in the same set of dictionaries
+-- (see where cmdId/jobX/... are declared), the widget:DrawX() callins below
+-- only need one loop each over the whole table, rather than one loop per
+-- source.
 
 local function DrawJobOutline(cmdId, x, y, z, h, r, target)
 	if cmdId < 0 then -- build job outline
@@ -528,10 +540,6 @@ function widget:DrawWorldPreUnit()
 	end
 
 	glLineWidth(2)
-	for hash, localCmdIdValue in pairs(localCmdId) do
-		DrawJobOutline(localCmdIdValue, localJobX[hash], localJobY[hash], localJobZ[hash],
-			localJobH[hash], localJobR[hash], localJobTarget[hash])
-	end
 	for key, cmdIdValue in pairs(cmdId) do
 		DrawJobOutline(cmdIdValue, jobX[key], jobY[key], jobZ[key], jobH[key], jobR[key], jobTarget[key])
 	end
@@ -544,22 +552,14 @@ function widget:DrawWorld()
 		return
 	end
 
-	local myTeamID = spGetMyTeamID()
-
 	glDepthTest(true)
 	glColor(1, 1, 1, 0.4)
-	for hash, localCmdIdValue in pairs(localCmdId) do
-		DrawJobGhost(localCmdIdValue, localJobX[hash], localJobY[hash], localJobZ[hash], localJobH[hash], myTeamID)
-	end
 	for key, cmdIdValue in pairs(cmdId) do
 		DrawJobGhost(cmdIdValue, jobX[key], jobY[key], jobZ[key], jobH[key], ownerTeamID[jobOwner[key]])
 	end
 	glDepthTest(false)
 
 	glColor(1, 1, 1, 0.7)
-	for hash, localCmdIdValue in pairs(localCmdId) do
-		DrawJobIcon(localCmdIdValue, localJobX[hash], localJobY[hash], localJobZ[hash], localJobTarget[hash])
-	end
 	for key, cmdIdValue in pairs(cmdId) do
 		DrawJobIcon(cmdIdValue, jobX[key], jobY[key], jobZ[key], jobTarget[key])
 	end
@@ -586,33 +586,32 @@ end
 -- `WG.GlobalBuildQueueShare.Delete(hash)` alongside it, not just the removal
 -- of the Lua table entry.
 local function UpdateJob(hash, job)
-	localCmdId[hash] = job.id
-	localJobX[hash] = job.x
-	localJobY[hash] = job.y
-	localJobZ[hash] = job.z
-	localJobH[hash] = job.h
-	localJobR[hash] = job.r
-	localJobTarget[hash] = job.target
-	localJobWorkers[hash] = job.workers
+	local key = myPlayerID .. "#" .. hash
+	cmdId[key] = job.id
+	jobX[key] = job.x
+	jobY[key] = job.y
+	jobZ[key] = job.z
+	jobH[key] = job.h
+	jobR[key] = job.r
+	jobTarget[key] = job.target
+	jobWorkers[key] = job.workers
+	jobOwner[key] = myPlayerID
 	pendingStatus[hash] = true
 end
 
 -- To be called whenever a job is removed - eg. GBC's own
 -- `buildQueue[hash] = nil` becomes `WG.GlobalBuildQueueShare.Delete(hash)`.
 local function DeleteJob(hash)
-	localCmdId[hash] = nil
-	localJobX[hash] = nil
-	localJobY[hash] = nil
-	localJobZ[hash] = nil
-	localJobH[hash] = nil
-	localJobR[hash] = nil
-	localJobTarget[hash] = nil
-	localJobWorkers[hash] = nil
+	ClearJob(myPlayerID .. "#" .. hash)
 	pendingStatus[hash] = false
 end
 
 function widget:Initialize()
 	myPlayerID = spGetMyPlayerID()
+	-- So our own ghost buildings get colored correctly by the same
+	-- ownerTeamID[jobOwner[key]] lookup used for everyone else's, without
+	-- special-casing "is this actually me" in the draw loop.
+	ownerTeamID[myPlayerID] = spGetMyTeamID()
 	WG.GlobalBuildQueueShare = {
 		Update = UpdateJob,
 		Delete = DeleteJob,
