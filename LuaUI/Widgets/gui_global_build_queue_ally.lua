@@ -321,40 +321,40 @@ local function BroadcastFull()
 	end
 end
 
--- Which hashes need an upsert or a removal this tick. Reused and cleared in
--- place every tick (table.clear() is a Spring extension, also used by GBC
--- itself) rather than reallocated, so naming the two sets explicitly doesn't
--- bring back the per-tick table churn we removed earlier.
-local jobsToUpdate = {}
-local jobsToDelete = {}
+-- Whether each changed hash needs an upsert (true) or a removal (false) this
+-- tick - a hash is never both, so one status dict covers it. Reused and
+-- cleared in place every tick (table.clear() is a Spring extension, also
+-- used by GBC itself) rather than reallocated, so naming it explicitly
+-- doesn't bring back the per-tick table churn we removed earlier.
+local jobUpdateStatus = {}
 
 local function BroadcastDeltaIfChanged()
-	table.clear(jobsToUpdate)
-	table.clear(jobsToDelete)
+	table.clear(jobUpdateStatus)
 
 	for hash in pairs(sentCmdId) do
 		if not localCmdId[hash] then
-			jobsToDelete[hash] = true
+			jobUpdateStatus[hash] = false
 		end
 	end
 	for hash in pairs(localCmdId) do
 		if LocalJobChanged(hash) then
-			jobsToUpdate[hash] = true
+			jobUpdateStatus[hash] = true
 		end
 	end
 
-	if next(jobsToUpdate) == nil and next(jobsToDelete) == nil then
+	if next(jobUpdateStatus) == nil then
 		return
 	end
 
 	local records = {}
-	for hash in pairs(jobsToDelete) do
-		records[#records+1] = EncodeRemove(hash)
-		ClearSentJob(hash)
-	end
-	for hash in pairs(jobsToUpdate) do
-		records[#records+1] = EncodeLocalUpsert(hash)
-		CopyLocalJobToSent(hash)
+	for hash, isUpdate in pairs(jobUpdateStatus) do
+		if isUpdate then
+			records[#records+1] = EncodeLocalUpsert(hash)
+			CopyLocalJobToSent(hash)
+		else
+			records[#records+1] = EncodeRemove(hash)
+			ClearSentJob(hash)
+		end
 	end
 	SendBatch("D", records)
 end
