@@ -97,15 +97,19 @@ local rep_color = {0.0, 0.8, 0.4, 1.0}
 local rec_color = {0.6, 0.0, 1.0, 1.0}
 local res_color = {0.4, 0.8, 1.0, 1.0}
 
--- Network protocol: "GBCQ|<type>|<seq>|<chunkIndex>|<chunkCount>|<data>"
--- <type> is "F" (full snapshot) or "D" (delta). <data> is zero or more
--- ';'-terminated records, each of one of two forms:
+-- Network protocol: two message shapes, both prefixed "GBCQ|".
+--
+-- "GBCQ|S" - a sync request, sent once by a newly-initialized widget. Anyone
+-- receiving it marks all of their own currently-owned hashes as pending (see
+-- MarkAllOwnJobsPending), so they go out through the ordinary delta path
+-- below rather than needing a separate "full snapshot" message shape.
+--
+-- "GBCQ|<seq>|<chunkIndex>|<chunkCount>|<data>" - a delta. <data> is zero or
+-- more ';'-terminated records, applied on top of whatever the receiver
+-- already has, each of one of two forms:
 --   U,<hash>,<cmdId>,<x>,<y>,<z>,<h>,<r>,<target>,<workers> -- add/update a job
 --   R,<hash>                                               -- remove a job
--- A full snapshot ('F') contains only "U" records and replaces the receiver's
--- entire stored queue for that sender. A delta ('D') applies its "U"/"R"
--- records on top of whatever the receiver already has. Empty optional fields
--- (h, r, target, workers) are encoded as "".
+-- Empty optional fields (h, r, target, workers) are encoded as "".
 --   hash    : a stable identifier for the job across calls (see UpdateJob/DeleteJob)
 --   cmdId   : negative unitDefID for a build job, or CMD.REPAIR/RECLAIM/RESURRECT
 --   x, y, z : world position (for build jobs, area jobs, and cached feature positions)
@@ -117,14 +121,12 @@ local res_color = {0.4, 0.8, 1.0, 1.0}
 -- Deltas alone are enough to keep everyone in sync even for a player who joins
 -- mid-game: Spring's join-in-progress catch-up replays the recorded network
 -- packet stream (including SendLuaUIMsg) from the start of the game, the same
--- way demo playback does. The periodic full snapshot below exists only as a
--- cheap safety net (e.g. for a widget that gets enabled mid-game, or to bound
--- the damage from a dropped/malformed message), not for late joiners.
+-- way demo playback does. The sync request above exists for the other case a
+-- one-off full send would otherwise be needed for: a widget enabled mid-game,
+-- which never received any of the deltas sent before it existed.
 local MSG_PREFIX = "GBCQ|"
 local MAX_CHUNK_DATA_LEN = 800
 local DELTA_INTERVAL = 0.5 -- seconds between checks for changes to broadcast
-local RESYNC_INTERVAL = 30.0 -- seconds between unconditional full-snapshot resyncs
-local EXPIRE_TIME = 3 * RESYNC_INTERVAL -- time without any update before we drop a player's queue
 local MAX_UPDATES_PER_SEND = 50 -- caps how many changed hashes go out in one delta, so a big burst spreads over multiple sends rather than spiking that one frame's message count
 
 local myPlayerID = spGetMyPlayerID()
@@ -165,19 +167,14 @@ local pendingStatus = {}
 
 local sendSeq = 0 -- transfer id for the chunked messages we send
 local deltaTimer = 0
-local resyncTimer = 0
 
 -- Per-player bookkeeping. This is naturally one entry per player rather than
--- per job, so it stays as small dictionaries. ownerTeamID gets one entry for
--- us too (set once in widget:Initialize(), purely so our own ghost buildings
--- can use the same ownerTeamID[jobOwner[key]] lookup as everyone else's).
--- ownerUpdatedAt never does, though: we don't send ourselves network
--- messages, so only ApplyRecordsData (for other players) ever touches it -
--- which conveniently also means the expiry sweep in widget:Update() can
--- never mistake our own queue for a player who's gone quiet.
+-- per job, so it stays as a small dictionary. Gets one entry for us too (set
+-- once in widget:Initialize()), purely so our own ghost buildings can use the
+-- same ownerTeamID[jobOwner[key]] lookup as everyone else's rather than a
+-- special case.
 local ownerTeamID = {}
-local ownerUpdatedAt = {}
-local pendingChunks = {} -- pendingChunks[playerID] = {type=, seq=, count=, parts={}, received=}
+local pendingChunks = {} -- pendingChunks[playerID] = {seq=, count=, parts={}, received=}
 
 --------------------------------------------------------------------------------
 --------------------------------------------------------------------------------
@@ -249,11 +246,11 @@ end
 --------------------------------------------------------------------------------
 -- Sending -----------------------------------------------------------------
 
-local function SendBatch(typeChar, records)
+local function SendBatch(records)
 	sendSeq = sendSeq + 1
 	local chunks = BuildChunks(records)
 	for i = 1, #chunks do
-		local msg = MSG_PREFIX .. typeChar .. "|" .. sendSeq .. "|" .. i .. "|" .. #chunks .. "|" .. chunks[i]
+		local msg = MSG_PREFIX .. sendSeq .. "|" .. i .. "|" .. #chunks .. "|" .. chunks[i]
 		spSendLuaUIMsg(msg, "a")
 		spSendLuaUIMsg(msg, "s")
 	end
@@ -267,24 +264,18 @@ local function EncodeLocalUpsert(hash)
 		jobH[key], jobR[key], jobTarget[key], jobWorkers[key])
 end
 
-local function BroadcastFull()
-	-- Scanning the whole (everyone's) table to find just our own entries
-	-- only happens here, on the infrequent (every RESYNC_INTERVAL) full
-	-- resync - not on the much more frequent BroadcastPending() path below,
-	-- which only ever touches pendingStatus.
+-- Marks every hash we currently own as pending an update, in response to a
+-- sync request from a newly-initialized widget elsewhere. Scanning the whole
+-- (everyone's) table to find just our own entries only happens here, when
+-- someone actually asks for it - never on the much more frequent
+-- BroadcastPending() path below, which only ever touches pendingStatus.
+local function MarkAllOwnJobsPending()
 	local myKeyPrefix = myPlayerID .. "#"
-	local records = {}
 	for key, owner in pairs(jobOwner) do
 		if owner == myPlayerID then
-			records[#records+1] = EncodeLocalUpsert(key:sub(#myKeyPrefix + 1))
+			pendingStatus[key:sub(#myKeyPrefix + 1)] = true
 		end
 	end
-	SendBatch("F", records)
-
-	-- Anything still pending is now redundant: the full snapshot above
-	-- already covers every current hash, including whatever changed since
-	-- the last send.
-	pendingStatus = {}
 end
 
 -- Drains up to MAX_UPDATES_PER_SEND of whatever UpdateJob()/DeleteJob() have
@@ -313,7 +304,7 @@ local function BroadcastPending()
 	if not records then
 		return
 	end
-	SendBatch("D", records)
+	SendBatch(records)
 end
 
 --------------------------------------------------------------------------------
@@ -335,14 +326,8 @@ local function ClearJob(key)
 	jobOwner[key] = nil
 end
 
-local function ApplyRecordsData(playerID, teamID, isFull, data)
+local function ApplyRecordsData(playerID, teamID, data)
 	ownerTeamID[playerID] = teamID
-	ownerUpdatedAt[playerID] = os.clock()
-
-	-- For a full snapshot, track which keys it mentions so we can prune
-	-- anything else already stored for this owner (eg. a job they had before
-	-- but have since finished/cancelled without us seeing the delta for it).
-	local newKeys = isFull and {} or nil
 
 	for record in data:gmatch("([^;]+);") do
 		local op, hash, decodedCmdId, x, y, z, h, r, target, workers = DecodeRecord(record)
@@ -358,18 +343,7 @@ local function ApplyRecordsData(playerID, teamID, isFull, data)
 				jobTarget[key] = target
 				jobWorkers[key] = workers
 				jobOwner[key] = playerID
-				if newKeys then
-					newKeys[key] = true
-				end
 			elseif op == "R" then
-				ClearJob(key)
-			end
-		end
-	end
-
-	if newKeys then
-		for key, owner in pairs(jobOwner) do
-			if owner == playerID and not newKeys[key] then
 				ClearJob(key)
 			end
 		end
@@ -383,17 +357,22 @@ function widget:RecvLuaMsg(msg, playerID)
 	if msg:sub(1, #MSG_PREFIX) ~= MSG_PREFIX then
 		return
 	end
+	local rest = msg:sub(#MSG_PREFIX + 1)
 
-	local typeChar, seqStr, idxStr, countStr, data =
-		msg:sub(#MSG_PREFIX + 1):match("^(%a)|(%d+)|(%d+)|(%d+)|(.*)$")
-	if not typeChar then
+	if rest == "S" then
+		MarkAllOwnJobsPending()
+		return
+	end
+
+	local seqStr, idxStr, countStr, data = rest:match("^(%d+)|(%d+)|(%d+)|(.*)$")
+	if not seqStr then
 		return
 	end
 	local seq, idx, count = tonumber(seqStr), tonumber(idxStr), tonumber(countStr)
 
 	local pending = pendingChunks[playerID]
 	if not pending or pending.seq ~= seq then
-		pending = {type = typeChar, seq = seq, count = count, parts = {}, received = 0}
+		pending = {seq = seq, count = count, parts = {}, received = 0}
 		pendingChunks[playerID] = pending
 	end
 	if not pending.parts[idx] then
@@ -405,38 +384,45 @@ function widget:RecvLuaMsg(msg, playerID)
 		pendingChunks[playerID] = nil
 		local fullData = table.concat(pending.parts, "", 1, pending.count)
 		local _, _, _, teamID = spGetPlayerInfo(playerID, false)
-		ApplyRecordsData(playerID, teamID, pending.type == "F", fullData)
+		ApplyRecordsData(playerID, teamID, fullData)
+	end
+end
+
+-- Precise, event-driven cleanup instead of a timeout: a player's queue stops
+-- mattering exactly when they leave (PlayerRemoved - disconnect/quit/kick) or
+-- resign (PlayerChanged, when Spring.GetPlayerInfo now reports them as a
+-- spectator), not after some guessed number of quiet seconds. This also means
+-- a player who simply hasn't changed their queue in a while is never
+-- mistaken for one who's gone.
+local function ClearPlayerJobs(playerID)
+	ownerTeamID[playerID] = nil
+	for key, owner in pairs(jobOwner) do
+		if owner == playerID then
+			ClearJob(key)
+		end
+	end
+end
+
+function widget:PlayerRemoved(playerID)
+	ClearPlayerJobs(playerID)
+end
+
+function widget:PlayerChanged(playerID)
+	local _, _, isSpec = spGetPlayerInfo(playerID, false)
+	if isSpec then
+		ClearPlayerJobs(playerID)
 	end
 end
 
 --------------------------------------------------------------------------------
 --------------------------------------------------------------------------------
--- Update / Expiry -------------------------------------------------------------
+-- Update -----------------------------------------------------------------
 
 function widget:Update(dt)
 	deltaTimer = deltaTimer + dt
-	resyncTimer = resyncTimer + dt
-
-	if resyncTimer >= RESYNC_INTERVAL then
-		resyncTimer = 0
-		deltaTimer = 0
-		BroadcastFull()
-	elseif deltaTimer >= DELTA_INTERVAL then
+	if deltaTimer >= DELTA_INTERVAL then
 		deltaTimer = 0
 		BroadcastPending()
-	end
-
-	local now = os.clock()
-	for playerID, updatedAt in pairs(ownerUpdatedAt) do
-		if now - updatedAt > EXPIRE_TIME then
-			ownerUpdatedAt[playerID] = nil
-			ownerTeamID[playerID] = nil
-			for key, owner in pairs(jobOwner) do
-				if owner == playerID then
-					ClearJob(key)
-				end
-			end
-		end
 	end
 end
 
@@ -619,6 +605,11 @@ function widget:Initialize()
 	-- ownerTeamID[jobOwner[key]] lookup used for everyone else's, without
 	-- special-casing "is this actually me" in the draw loop.
 	ownerTeamID[myPlayerID] = spGetMyTeamID()
+	-- Ask everyone else to (re-)send their current queue, since we won't have
+	-- seen any of the deltas from before we existed (eg. this widget just got
+	-- enabled mid-game).
+	spSendLuaUIMsg(MSG_PREFIX .. "S", "a")
+	spSendLuaUIMsg(MSG_PREFIX .. "S", "s")
 	WG.GlobalBuildQueueShare = {
 		Update = UpdateJob,
 		Delete = DeleteJob,
