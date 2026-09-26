@@ -97,16 +97,20 @@ local rep_color = {0.0, 0.8, 0.4, 1.0}
 local rec_color = {0.6, 0.0, 1.0, 1.0}
 local res_color = {0.4, 0.8, 1.0, 1.0}
 
--- Network protocol: two message shapes, both prefixed "GBCQ|".
+-- Network protocol: two message shapes, both prefixed "GBCQ|", and both
+-- always sent whole in a single SendLuaUIMsg call - Spring's NETMSG_LUAMSG
+-- uses a uint16 size field (~65KB ceiling), and MAX_UPDATES_PER_SEND already
+-- keeps a batch to a few KB at most, so there's no need to split a send
+-- across multiple messages or reassemble one on the receiving end.
 --
 -- "GBCQ|S" - a sync request, sent once by a newly-initialized widget. Anyone
 -- receiving it marks all of their own currently-owned hashes as pending (see
 -- MarkAllOwnJobsPending), so they go out through the ordinary delta path
 -- below rather than needing a separate "full snapshot" message shape.
 --
--- "GBCQ|<seq>|<chunkIndex>|<chunkCount>|<data>" - a delta. <data> is zero or
--- more ';'-terminated records, applied on top of whatever the receiver
--- already has, each of one of two forms:
+-- "GBCQ|<data>" - a delta. <data> is zero or more ';'-terminated records,
+-- applied on top of whatever the receiver already has, each of one of two
+-- forms:
 --   U,<hash>,<cmdId>,<x>,<y>,<z>,<h>,<r>,<target>,<workers> -- add/update a job
 --   R,<hash>                                               -- remove a job
 -- Empty optional fields (h, r, target, workers) are encoded as "".
@@ -125,7 +129,6 @@ local res_color = {0.4, 0.8, 1.0, 1.0}
 -- one-off full send would otherwise be needed for: a widget enabled mid-game,
 -- which never received any of the deltas sent before it existed.
 local MSG_PREFIX = "GBCQ|"
-local MAX_CHUNK_DATA_LEN = 800
 local DELTA_INTERVAL = 0.5 -- seconds between checks for changes to broadcast
 local MAX_UPDATES_PER_SEND = 50 -- caps how many changed hashes go out in one delta, so a big burst spreads over multiple sends rather than spiking that one frame's message count
 
@@ -165,7 +168,6 @@ local jobOwner = {} -- jobOwner[key] = the owning playerID
 -- tracks our own changes.
 local pendingStatus = {}
 
-local sendSeq = 0 -- transfer id for the chunked messages we send
 local deltaTimer = 0
 
 -- Per-player bookkeeping. This is naturally one entry per player rather than
@@ -174,7 +176,6 @@ local deltaTimer = 0
 -- same ownerTeamID[jobOwner[key]] lookup as everyone else's rather than a
 -- special case.
 local ownerTeamID = {}
-local pendingChunks = {} -- pendingChunks[playerID] = {seq=, count=, parts={}, received=}
 
 --------------------------------------------------------------------------------
 --------------------------------------------------------------------------------
@@ -220,40 +221,16 @@ local function DecodeRecord(record)
 	return nil
 end
 
--- Splits already-encoded (';'-terminated) records into chunk strings, never
--- splitting a record across a chunk boundary.
-local function BuildChunks(records)
-	local chunks = {}
-	local current = {}
-	local currentLen = 0
-	for i = 1, #records do
-		local record = records[i]
-		if currentLen > 0 and currentLen + #record > MAX_CHUNK_DATA_LEN then
-			chunks[#chunks+1] = table.concat(current)
-			current = {}
-			currentLen = 0
-		end
-		current[#current+1] = record
-		currentLen = currentLen + #record
-	end
-	if currentLen > 0 or #chunks == 0 then
-		chunks[#chunks+1] = table.concat(current)
-	end
-	return chunks
-end
-
 --------------------------------------------------------------------------------
 --------------------------------------------------------------------------------
 -- Sending -----------------------------------------------------------------
 
+-- Sent whole, in one SendLuaUIMsg call - see the network protocol comment
+-- above for why that's safe.
 local function SendBatch(records)
-	sendSeq = sendSeq + 1
-	local chunks = BuildChunks(records)
-	for i = 1, #chunks do
-		local msg = MSG_PREFIX .. sendSeq .. "|" .. i .. "|" .. #chunks .. "|" .. chunks[i]
-		spSendLuaUIMsg(msg, "a")
-		spSendLuaUIMsg(msg, "s")
-	end
+	local msg = MSG_PREFIX .. table.concat(records)
+	spSendLuaUIMsg(msg, "a")
+	spSendLuaUIMsg(msg, "s")
 end
 
 -- Reads back one of our own jobs by its bare hash, deriving the storage key
@@ -364,28 +341,8 @@ function widget:RecvLuaMsg(msg, playerID)
 		return
 	end
 
-	local seqStr, idxStr, countStr, data = rest:match("^(%d+)|(%d+)|(%d+)|(.*)$")
-	if not seqStr then
-		return
-	end
-	local seq, idx, count = tonumber(seqStr), tonumber(idxStr), tonumber(countStr)
-
-	local pending = pendingChunks[playerID]
-	if not pending or pending.seq ~= seq then
-		pending = {seq = seq, count = count, parts = {}, received = 0}
-		pendingChunks[playerID] = pending
-	end
-	if not pending.parts[idx] then
-		pending.parts[idx] = data
-		pending.received = pending.received + 1
-	end
-
-	if pending.received >= pending.count then
-		pendingChunks[playerID] = nil
-		local fullData = table.concat(pending.parts, "", 1, pending.count)
-		local _, _, _, teamID = spGetPlayerInfo(playerID, false)
-		ApplyRecordsData(playerID, teamID, fullData)
-	end
+	local _, _, _, teamID = spGetPlayerInfo(playerID, false)
+	ApplyRecordsData(playerID, teamID, rest)
 end
 
 -- Precise, event-driven cleanup instead of a timeout: a player's queue stops
