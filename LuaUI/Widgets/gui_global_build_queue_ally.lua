@@ -109,18 +109,30 @@ local res_color = {0.4, 0.8, 1.0, 1.0}
 -- below rather than needing a separate "full snapshot" message shape.
 --
 -- "GBCQ|<data>" - a delta. <data> is zero or more ';'-terminated records,
--- applied on top of whatever the receiver already has, each of one of two
+-- applied on top of whatever the receiver already has, each of one of three
 -- forms:
---   U,<hash>,<cmdId>,<x>,<y>,<z>,<h>,<r>,<target>,<workers> -- add/update a job
---   R,<hash>                                               -- remove a job
--- Empty optional fields (h, r, target, workers) are encoded as "".
+--   U,<hash>,<cmdId>,<x>,<y>,<z>,<h>,<r>,<target> -- add/update a job
+--   R,<hash>                                      -- remove a job
+--   A,<ownerPlayerID>,<hash>,<workers>             -- report an assist count
+-- Empty optional fields (h, r, target) are encoded as "".
 --   hash    : a stable identifier for the job across calls (see UpdateJob/DeleteJob)
 --   cmdId   : negative unitDefID for a build job, or CMD.REPAIR/RECLAIM/RESURRECT
 --   x, y, z : world position (for build jobs, area jobs, and cached feature positions)
 --   h       : build facing (0-3), build jobs only
 --   r       : area radius, area repair/reclaim/resurrect jobs only
 --   target  : unit or feature ID (Game.maxUnits + featureID), single-target jobs only
---   workers : number of workers currently assigned to the job (purely informational)
+--
+-- A job's worker count isn't part of the job record itself - it's the sum of
+-- however many workers each interested player (the owner included) reports
+-- assigning to it via "A" records, since any ally can assist a job without
+-- owning it. The sender of an "A" record is always the assisting player (the
+-- same convention "U"/"R" use), so only the job's owner needs naming
+-- explicitly; workers = 0 means that player stopped assisting. There's no
+-- ordering guarantee between a job's own "U"/"R" records and "A" records
+-- about it - SendLuaUIMsg is relayed immediately by the server, not
+-- attached to the deterministic simulation frame stream, so an assist
+-- report can arrive before the job it refers to, or after the job's been
+-- removed. Both are treated as normal, silent no-ops rather than errors.
 --
 -- Deltas alone are enough to keep everyone in sync even for a player who joins
 -- mid-game: Spring's join-in-progress catch-up replays the recorded network
@@ -154,8 +166,19 @@ local jobZ = {}
 local jobH = {}
 local jobR = {}
 local jobTarget = {}
-local jobWorkers = {}
 local jobOwner = {} -- jobOwner[key] = the owning playerID
+
+-- How many workers each player has individually assigned to a given job,
+-- independent of who owns it - an ally can assist a job without becoming
+-- its owner, and the owner's own workers are just another contribution
+-- alongside theirs. Keyed by "<ownerKey>#<assistingPlayerID>" so multiple
+-- players' contributions to the same job don't collide.
+local assistWorkers = {}
+
+-- jobWorkersTotal[ownerKey] = the sum of assistWorkers[ownerKey.."#"..p] over
+-- every assisting player p, maintained incrementally by SetAssist() as
+-- contributions change rather than re-summed by scanning on every read.
+local jobWorkersTotal = {}
 
 -- Which of our own hashes have changed since the last send, and how: true
 -- means UpdateJob() was called (so the fields above already hold the new
@@ -166,6 +189,12 @@ local jobOwner = {} -- jobOwner[key] = the owning playerID
 -- diff. Keyed by bare hash, not "<playerID>#<hash>", since it only ever
 -- tracks our own changes.
 local pendingStatus = {}
+
+-- Same idea as pendingStatus, but for our own assist contributions: which
+-- jobs (by ownerKey, since we can assist a job without owning it) we've
+-- changed our own worker count on since the last send. Populated by
+-- AssistJob() and drained by BroadcastPending() alongside pendingStatus.
+local pendingAssist = {}
 
 -- Per-player bookkeeping. This is naturally one entry per player rather than
 -- per job, so it stays as a small dictionary. Gets one entry for us too (set
@@ -178,7 +207,7 @@ local ownerTeamID = {}
 --------------------------------------------------------------------------------
 -- Encoding / Decoding ---------------------------------------------------------
 
-local function EncodeUpsert(hash, cmdId, x, y, z, h, r, target, workers)
+local function EncodeUpsert(hash, cmdId, x, y, z, h, r, target)
 	return "U," .. hash .. ","
 		.. (cmdId or 0) .. ","
 		.. floor(x or 0) .. ","
@@ -186,8 +215,7 @@ local function EncodeUpsert(hash, cmdId, x, y, z, h, r, target, workers)
 		.. floor(z or 0) .. ","
 		.. (h and floor(h) or "") .. ","
 		.. (r and floor(r) or "") .. ","
-		.. (target and floor(target) or "") .. ","
-		.. (workers and floor(workers) or "")
+		.. (target and floor(target) or "")
 		.. ";"
 end
 
@@ -195,27 +223,37 @@ local function EncodeRemove(hash)
 	return "R," .. hash .. ";"
 end
 
--- Returns op ("U" or "R"), hash, and (for "U") the decoded scalar fields -
--- deliberately not packed into a job table, to avoid allocating one per
--- record decoded.
+local function EncodeAssist(ownerPlayerID, hash, workers)
+	return "A," .. ownerPlayerID .. "," .. hash .. "," .. floor(workers or 0) .. ";"
+end
+
+-- Splits a record into its op char and everything after the first comma,
+-- without otherwise interpreting it - the op-specific Decode* functions
+-- below do that, so a caller only pays for parsing the shape it actually got.
 local function DecodeRecord(record)
-	local op, rest = record:match("^(%a),(.*)$")
-	if op == "R" then
-		return "R", rest
-	elseif op == "U" then
-		local hash, cmdId, x, y, z, h, r, target, workers =
-			rest:match("^([^,]+),(-?%d+),(-?%d+),(-?%d+),(-?%d+),(%d*),(%d*),(%d*),(%d*)$")
-		if not hash then
-			return nil
-		end
-		return "U", hash,
-			tonumber(cmdId), tonumber(x), tonumber(y), tonumber(z),
-			(h ~= "") and tonumber(h) or nil,
-			(r ~= "") and tonumber(r) or nil,
-			(target ~= "") and tonumber(target) or nil,
-			(workers ~= "") and tonumber(workers) or nil
+	return record:match("^(%a),(.*)$")
+end
+
+-- Returns the decoded scalar fields for a "U" record's rest (deliberately
+-- not packed into a job table, to avoid allocating one per record decoded).
+local function DecodeUpsert(rest)
+	local hash, cmdId, x, y, z, h, r, target =
+		rest:match("^([^,]+),(-?%d+),(-?%d+),(-?%d+),(-?%d+),(%d*),(%d*),(%d*)$")
+	if not hash then
+		return nil
 	end
-	return nil
+	return hash, tonumber(cmdId), tonumber(x), tonumber(y), tonumber(z),
+		(h ~= "") and tonumber(h) or nil,
+		(r ~= "") and tonumber(r) or nil,
+		(target ~= "") and tonumber(target) or nil
+end
+
+local function DecodeAssist(rest)
+	local ownerPlayerID, hash, workers = rest:match("^(%d+),([^,]+),(%d+)$")
+	if not ownerPlayerID then
+		return nil
+	end
+	return tonumber(ownerPlayerID), hash, tonumber(workers)
 end
 
 --------------------------------------------------------------------------------
@@ -235,7 +273,14 @@ end
 local function EncodeLocalUpsert(hash)
 	local key = myPlayerID .. "#" .. hash
 	return EncodeUpsert(hash, cmdId[key], jobX[key], jobY[key], jobZ[key],
-		jobH[key], jobR[key], jobTarget[key], jobWorkers[key])
+		jobH[key], jobR[key], jobTarget[key])
+end
+
+-- Reads back our own current assist contribution to ownerKey, deriving the
+-- assist storage key the same way SetAssist does.
+local function EncodeLocalAssist(ownerKey)
+	local ownerPlayerID, hash = ownerKey:match("^(%d+)#(.+)$")
+	return EncodeAssist(ownerPlayerID, hash, assistWorkers[ownerKey .. "#" .. myPlayerID])
 end
 
 -- Marks every hash we currently own as pending an update, in response to a
@@ -248,6 +293,15 @@ local function MarkAllOwnJobsPending()
 	for key, owner in pairs(jobOwner) do
 		if owner == myPlayerID then
 			pendingStatus[key:sub(#myKeyPrefix + 1)] = true
+		end
+	end
+
+	-- Our own assist contributions are just as much "our data" as our own
+	-- jobs are - a fresh widget elsewhere won't have seen those either.
+	local mySuffix = "#" .. myPlayerID
+	for assistKey in pairs(assistWorkers) do
+		if assistKey:sub(-#mySuffix) == mySuffix then
+			pendingAssist[assistKey:sub(1, -#mySuffix - 1)] = true
 		end
 	end
 end
@@ -275,6 +329,16 @@ local function BroadcastPending()
 		sent = sent + 1
 	end
 
+	for ownerKey in pairs(pendingAssist) do
+		if sent >= MAX_UPDATES_PER_SEND then
+			break
+		end
+		records = records or {}
+		records[#records+1] = EncodeLocalAssist(ownerKey)
+		pendingAssist[ownerKey] = nil
+		sent = sent + 1
+	end
+
 	if not records then
 		return
 	end
@@ -285,9 +349,30 @@ end
 --------------------------------------------------------------------------------
 -- Receiving -----------------------------------------------------------------
 
+-- Applies one player's reported assist contribution to a job (ownerKey,
+-- since the job may belong to someone else entirely), adjusting the job's
+-- running total by the difference rather than re-summing every contributor.
+-- Shared by AssistJob() (our own contribution) and ApplyRecordsData() below
+-- (everyone else's). A dangling contribution to a job that doesn't exist
+-- (yet, or anymore - see the network protocol comment on ordering) is stored
+-- exactly the same as any other: it costs nothing to hold, and resolves
+-- itself if the job later shows up or is cleaned up alongside it.
+local function SetAssist(ownerKey, assistingPlayerID, workers)
+	local assistKey = ownerKey .. "#" .. assistingPlayerID
+	local old = assistWorkers[assistKey] or 0
+	workers = workers or 0
+	assistWorkers[assistKey] = (workers ~= 0) and workers or nil
+	local total = (jobWorkersTotal[ownerKey] or 0) - old + workers
+	jobWorkersTotal[ownerKey] = (total ~= 0) and total or nil
+end
+
 -- Clears one job by its full storage key ("<playerID>#<hash>"), whether it's
 -- ours or another player's - shared by DeleteJob() and the receiving code
--- below.
+-- below. Also drops every assist contribution to it (ours and anyone else's)
+-- and its worker total, since none of that means anything once the job's
+-- gone. This is an O(assistWorkers size) scan, same tradeoff ClearPlayerJobs
+-- below already makes: fine for a rare, per-job event, not something that
+-- runs on the frequent send/receive path.
 local function ClearJob(key)
 	cmdId[key] = nil
 	jobX[key] = nil
@@ -296,18 +381,25 @@ local function ClearJob(key)
 	jobH[key] = nil
 	jobR[key] = nil
 	jobTarget[key] = nil
-	jobWorkers[key] = nil
 	jobOwner[key] = nil
+	jobWorkersTotal[key] = nil
+	local prefix = key .. "#"
+	for assistKey in pairs(assistWorkers) do
+		if assistKey:sub(1, #prefix) == prefix then
+			assistWorkers[assistKey] = nil
+		end
+	end
 end
 
 local function ApplyRecordsData(playerID, teamID, data)
 	ownerTeamID[playerID] = teamID
 
 	for record in data:gmatch("([^;]+);") do
-		local op, hash, decodedCmdId, x, y, z, h, r, target, workers = DecodeRecord(record)
-		if op then
-			local key = playerID .. "#" .. hash
-			if op == "U" then
+		local op, rest = DecodeRecord(record)
+		if op == "U" then
+			local hash, decodedCmdId, x, y, z, h, r, target = DecodeUpsert(rest)
+			if hash then
+				local key = playerID .. "#" .. hash
 				cmdId[key] = decodedCmdId
 				jobX[key] = x
 				jobY[key] = y
@@ -315,10 +407,14 @@ local function ApplyRecordsData(playerID, teamID, data)
 				jobH[key] = h
 				jobR[key] = r
 				jobTarget[key] = target
-				jobWorkers[key] = workers
 				jobOwner[key] = playerID
-			elseif op == "R" then
-				ClearJob(key)
+			end
+		elseif op == "R" then
+			ClearJob(playerID .. "#" .. rest)
+		elseif op == "A" then
+			local ownerPlayerID, hash, workers = DecodeAssist(rest)
+			if ownerPlayerID then
+				SetAssist(ownerPlayerID .. "#" .. hash, playerID, workers)
 			end
 		end
 	end
@@ -353,6 +449,19 @@ local function ClearPlayerJobs(playerID)
 	for key, owner in pairs(jobOwner) do
 		if owner == playerID then
 			ClearJob(key)
+		end
+	end
+
+	-- Also drop whatever this player was assisting, even jobs they didn't own
+	-- themselves - ClearJob() above only cleared assist entries for jobs
+	-- *they* owned, not their contributions to everyone else's.
+	local suffix = "#" .. playerID
+	for assistKey, workers in pairs(assistWorkers) do
+		if assistKey:sub(-#suffix) == suffix then
+			local ownerKey = assistKey:sub(1, -#suffix - 1)
+			local total = (jobWorkersTotal[ownerKey] or 0) - workers
+			jobWorkersTotal[ownerKey] = (total ~= 0) and total or nil
+			assistWorkers[assistKey] = nil
 		end
 	end
 end
@@ -519,8 +628,8 @@ end
 -- whenever it adds a job or changes one it already has - eg. GBC's own
 -- `buildQueue[hash] = myCmd` becomes `WG.GlobalBuildQueueShare.Update(hash,
 -- myCmd)`. `job` must have the fields documented in the network protocol
--- comment above (id, x, y, z, and the optional h/r/target/workers). `hash`
--- must be a stable identifier for this exact job across calls (GBC's own
+-- comment above (id, x, y, z, and the optional h/r/target). `hash` must be a
+-- stable identifier for this exact job across calls (GBC's own
 -- BuildHash(cmd) already is one).
 --
 -- There's no "replace everything" call: a hash sticks around until Delete()
@@ -537,7 +646,6 @@ local function UpdateJob(hash, job)
 	jobH[key] = job.h
 	jobR[key] = job.r
 	jobTarget[key] = job.target
-	jobWorkers[key] = job.workers
 	jobOwner[key] = myPlayerID
 	pendingStatus[hash] = true
 end
@@ -547,6 +655,26 @@ end
 local function DeleteJob(hash)
 	ClearJob(myPlayerID .. "#" .. hash)
 	pendingStatus[hash] = false
+end
+
+-- To be called whenever the number of workers *we* have assigned to a job
+-- changes, whether it's our own job or one we're just assisting - eg. an AI
+-- deciding to send 2 workers to help build something an ally queued would
+-- call WG.GlobalBuildQueueShare.Assist(allyPlayerID, hash, 2). Unlike
+-- Update()/Delete(), the job's owner has to be named explicitly, since we're
+-- reporting our own contribution to a job we don't necessarily own.
+-- workers = 0 (or nil) means we've stopped assisting it.
+local function AssistJob(ownerPlayerID, hash, workers)
+	local ownerKey = ownerPlayerID .. "#" .. hash
+	SetAssist(ownerKey, myPlayerID, workers)
+	pendingAssist[ownerKey] = true
+end
+
+-- Returns the total number of workers everyone (owner included) has
+-- currently assigned to a job, for an AI deciding what a worker should work
+-- on next. 0 if nobody's reported assisting it (or it doesn't exist).
+local function GetWorkerCount(ownerPlayerID, hash)
+	return jobWorkersTotal[ownerPlayerID .. "#" .. hash] or 0
 end
 
 function widget:Initialize()
@@ -563,6 +691,8 @@ function widget:Initialize()
 	WG.GlobalBuildQueueShare = {
 		Update = UpdateJob,
 		Delete = DeleteJob,
+		Assist = AssistJob,
+		GetWorkerCount = GetWorkerCount,
 	}
 end
 
