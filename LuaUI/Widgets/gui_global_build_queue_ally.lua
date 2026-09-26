@@ -11,7 +11,7 @@
 --  local player too, not just for allies/spectators.
 --
 --  Note: This widget currently has nothing to display, because nothing calls
---  WG.GlobalBuildQueueShare.SetLocalQueue() yet. That hookup into
+--  WG.GlobalBuildQueueShare.Update()/Delete() yet. That hookup into
 --  unit_global_build_command.lua (or any other queue-like widget) is a
 --  separate, later change. This file only implements the share/receive/draw
 --  side of the feature, plus its public API.
@@ -22,7 +22,7 @@
 function widget:GetInfo()
 	return {
 		name      = "Global Build Queue",
-		desc      = "Shows your own Global Build Command queue, allied players' queues, and (for spectators) every player's queue. Nothing to see yet unless something calls the SetLocalQueue API.",
+		desc      = "Shows your own Global Build Command queue, allied players' queues, and (for spectators) every player's queue. Nothing to see yet unless something calls the Update/Delete API.",
 		author    = "amnykon",
 		date      = "September 25, 2026",
 		license   = "GNU GPL, v2 or later",
@@ -106,7 +106,7 @@ local res_color = {0.4, 0.8, 1.0, 1.0}
 -- entire stored queue for that sender. A delta ('D') applies its "U"/"R"
 -- records on top of whatever the receiver already has. Empty optional fields
 -- (h, r, target, workers) are encoded as "".
---   hash    : a stable identifier for the job across calls (see SetLocalQueue)
+--   hash    : a stable identifier for the job across calls (see UpdateJob/DeleteJob)
 --   cmdId   : negative unitDefID for a build job, or CMD.REPAIR/RECLAIM/RESURRECT
 --   x, y, z : world position (for build jobs, area jobs, and cached feature positions)
 --   h       : build facing (0-3), build jobs only
@@ -136,7 +136,7 @@ local myPlayerID = spGetMyPlayerID()
 -- code around them.
 
 -- Our own queue, as given to us through the public API (see bottom of file),
--- keyed by a stable per-job hash (see SetLocalQueue for where this comes from).
+-- keyed by a stable per-job hash (see UpdateJob for where this comes from).
 local localCmdId = {}
 local localJobX = {}
 local localJobY = {}
@@ -146,16 +146,13 @@ local localJobR = {}
 local localJobTarget = {}
 local localJobWorkers = {}
 
--- What we last told everyone we have - the diff baseline - same layout as
--- the localJob* set above, and always keyed the same way (by hash).
-local sentCmdId = {}
-local sentJobX = {}
-local sentJobY = {}
-local sentJobZ = {}
-local sentJobH = {}
-local sentJobR = {}
-local sentJobTarget = {}
-local sentJobWorkers = {}
+-- Which hashes have changed since the last send, and how: true means
+-- UpdateJob() was called (so local* already holds the new fields, ready to
+-- encode), false means DeleteJob() was called. Populated directly by the
+-- public API (see the bottom of this file) rather than by comparing local*
+-- against a second full copy of itself every send tick - the caller already
+-- knows exactly when something changed, so there's nothing to diff.
+local pendingStatus = {}
 
 local sendSeq = 0 -- transfer id for the chunked messages we send
 local deltaTimer = 0
@@ -267,40 +264,6 @@ local function EncodeLocalUpsert(hash)
 		localJobH[hash], localJobR[hash], localJobTarget[hash], localJobWorkers[hash])
 end
 
-local function CopyLocalJobToSent(hash)
-	sentCmdId[hash] = localCmdId[hash]
-	sentJobX[hash] = localJobX[hash]
-	sentJobY[hash] = localJobY[hash]
-	sentJobZ[hash] = localJobZ[hash]
-	sentJobH[hash] = localJobH[hash]
-	sentJobR[hash] = localJobR[hash]
-	sentJobTarget[hash] = localJobTarget[hash]
-	sentJobWorkers[hash] = localJobWorkers[hash]
-end
-
-local function ClearSentJob(hash)
-	sentCmdId[hash] = nil
-	sentJobX[hash] = nil
-	sentJobY[hash] = nil
-	sentJobZ[hash] = nil
-	sentJobH[hash] = nil
-	sentJobR[hash] = nil
-	sentJobTarget[hash] = nil
-	sentJobWorkers[hash] = nil
-end
-
-local function LocalJobChanged(hash)
-	return sentCmdId[hash] == nil
-		or sentCmdId[hash] ~= localCmdId[hash]
-		or sentJobX[hash] ~= localJobX[hash]
-		or sentJobY[hash] ~= localJobY[hash]
-		or sentJobZ[hash] ~= localJobZ[hash]
-		or sentJobH[hash] ~= localJobH[hash]
-		or sentJobR[hash] ~= localJobR[hash]
-		or sentJobTarget[hash] ~= localJobTarget[hash]
-		or sentJobWorkers[hash] ~= localJobWorkers[hash]
-end
-
 local function BroadcastFull()
 	local records = {}
 	for hash in pairs(localCmdId) do
@@ -308,52 +271,30 @@ local function BroadcastFull()
 	end
 	SendBatch("F", records)
 
-	-- Reset the baseline to exactly match localJob*, mutating sentJob* in
-	-- place (clearing an existing field mid-traversal is safe per the Lua
-	-- manual; adding a new one isn't, which is why these stay separate loops).
-	for hash in pairs(sentCmdId) do
-		if not localCmdId[hash] then
-			ClearSentJob(hash)
-		end
-	end
-	for hash in pairs(localCmdId) do
-		CopyLocalJobToSent(hash)
-	end
+	-- Anything still pending is now redundant: the full snapshot above
+	-- already covers every current hash, including whatever changed since
+	-- the last send.
+	pendingStatus = {}
 end
 
--- Whether each changed hash needs an upsert (true) or a removal (false) this
--- tick - a hash is never both, so one status dict covers it. Reused and
--- cleared in place every tick (table.clear() is a Spring extension, also
--- used by GBC itself) rather than reallocated, so naming it explicitly
--- doesn't bring back the per-tick table churn we removed earlier.
-local jobUpdateStatus = {}
-
-local function BroadcastDeltaIfChanged()
-	table.clear(jobUpdateStatus)
-
-	for hash in pairs(sentCmdId) do
-		if not localCmdId[hash] then
-			jobUpdateStatus[hash] = false
-		end
-	end
-	for hash in pairs(localCmdId) do
-		if LocalJobChanged(hash) then
-			jobUpdateStatus[hash] = true
-		end
-	end
-
-	if next(jobUpdateStatus) == nil then
+-- Drains whatever UpdateJob()/DeleteJob() have queued up since the last
+-- send. Swaps in a fresh table up front rather than clearing this one in
+-- place, so the batch we're about to encode can't be touched by any
+-- UpdateJob()/DeleteJob() call that happens to run before we're done with it.
+local function BroadcastPending()
+	if next(pendingStatus) == nil then
 		return
 	end
 
+	local batch = pendingStatus
+	pendingStatus = {}
+
 	local records = {}
-	for hash, isUpdate in pairs(jobUpdateStatus) do
+	for hash, isUpdate in pairs(batch) do
 		if isUpdate then
 			records[#records+1] = EncodeLocalUpsert(hash)
-			CopyLocalJobToSent(hash)
 		else
 			records[#records+1] = EncodeRemove(hash)
-			ClearSentJob(hash)
 		end
 	end
 	SendBatch("D", records)
@@ -463,7 +404,7 @@ function widget:Update(dt)
 		BroadcastFull()
 	elseif deltaTimer >= DELTA_INTERVAL then
 		deltaTimer = 0
-		BroadcastDeltaIfChanged()
+		BroadcastPending()
 	end
 
 	local now = os.clock()
@@ -631,7 +572,34 @@ end
 --------------------------------------------------------------------------------
 -- Public API ------------------------------------------------------------------
 
-local function ClearLocalJob(hash)
+-- To be called (later, from unit_global_build_command.lua or similar)
+-- whenever it adds a job or changes one it already has - eg. GBC's own
+-- `buildQueue[hash] = myCmd` becomes `WG.GlobalBuildQueueShare.Update(hash,
+-- myCmd)`. `job` must have the fields documented in the network protocol
+-- comment above (id, x, y, z, and the optional h/r/target/workers). `hash`
+-- must be a stable identifier for this exact job across calls (GBC's own
+-- BuildHash(cmd) already is one).
+--
+-- There's no "replace everything" call: a hash sticks around until Delete()
+-- is called for it specifically, so every removal needs its own explicit
+-- Delete() call - eg. GBC's own `buildQueue[hash] = nil` needs a matching
+-- `WG.GlobalBuildQueueShare.Delete(hash)` alongside it, not just the removal
+-- of the Lua table entry.
+local function UpdateJob(hash, job)
+	localCmdId[hash] = job.id
+	localJobX[hash] = job.x
+	localJobY[hash] = job.y
+	localJobZ[hash] = job.z
+	localJobH[hash] = job.h
+	localJobR[hash] = job.r
+	localJobTarget[hash] = job.target
+	localJobWorkers[hash] = job.workers
+	pendingStatus[hash] = true
+end
+
+-- To be called whenever a job is removed - eg. GBC's own
+-- `buildQueue[hash] = nil` becomes `WG.GlobalBuildQueueShare.Delete(hash)`.
+local function DeleteJob(hash)
 	localCmdId[hash] = nil
 	localJobX[hash] = nil
 	localJobY[hash] = nil
@@ -640,41 +608,14 @@ local function ClearLocalJob(hash)
 	localJobR[hash] = nil
 	localJobTarget[hash] = nil
 	localJobWorkers[hash] = nil
-end
-
--- To be called (later, from unit_global_build_command.lua or similar) every
--- time the caller's own build queue changes. Unlike a live table reference,
--- this copies the given fields out immediately into our own flat per-field
--- dictionaries, so call it again whenever anything changes rather than
--- expecting us to notice an in-place edit to a table you handed us earlier.
---
--- `jobs` must be a dict keyed by a stable per-job identifier that stays the
--- same for the same logical job across calls (GBC's own buildQueue is already
--- keyed exactly this way, by BuildHash(cmd)), mapping to a job table with the
--- fields documented in the network protocol comment above.
-local function SetLocalQueue(jobs)
-	jobs = jobs or {}
-	for hash in pairs(localCmdId) do
-		if not jobs[hash] then
-			ClearLocalJob(hash)
-		end
-	end
-	for hash, job in pairs(jobs) do
-		localCmdId[hash] = job.id
-		localJobX[hash] = job.x
-		localJobY[hash] = job.y
-		localJobZ[hash] = job.z
-		localJobH[hash] = job.h
-		localJobR[hash] = job.r
-		localJobTarget[hash] = job.target
-		localJobWorkers[hash] = job.workers
-	end
+	pendingStatus[hash] = false
 end
 
 function widget:Initialize()
 	myPlayerID = spGetMyPlayerID()
 	WG.GlobalBuildQueueShare = {
-		SetLocalQueue = SetLocalQueue,
+		Update = UpdateJob,
+		Delete = DeleteJob,
 	}
 end
 
