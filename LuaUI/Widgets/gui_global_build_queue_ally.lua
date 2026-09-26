@@ -715,6 +715,33 @@ local function AssistJob(ownerPlayerID, hash, workers)
 	pendingAssist[ownerKey] = true
 end
 
+-- Returns one of a job's core fields (see the network protocol comment above
+-- for what each means), or nil if the job doesn't exist. This is GBC's own
+-- read access into any player's queue, including its own - the same way
+-- GetWorkerCount()/GetReach()/GetPriority()/GetUnitID() below expose the
+-- rest of a job's data.
+local function GetCmdId(ownerPlayerID, hash)
+	return cmdId[ownerPlayerID .. "#" .. hash]
+end
+local function GetX(ownerPlayerID, hash)
+	return jobX[ownerPlayerID .. "#" .. hash]
+end
+local function GetY(ownerPlayerID, hash)
+	return jobY[ownerPlayerID .. "#" .. hash]
+end
+local function GetZ(ownerPlayerID, hash)
+	return jobZ[ownerPlayerID .. "#" .. hash]
+end
+local function GetH(ownerPlayerID, hash)
+	return jobH[ownerPlayerID .. "#" .. hash]
+end
+local function GetR(ownerPlayerID, hash)
+	return jobR[ownerPlayerID .. "#" .. hash]
+end
+local function GetTarget(ownerPlayerID, hash)
+	return jobTarget[ownerPlayerID .. "#" .. hash]
+end
+
 -- Returns the total number of workers everyone (owner included) has
 -- currently assigned to a job, for an AI deciding what a worker should work
 -- on next. 0 if nobody's reported assisting it (or it doesn't exist).
@@ -755,6 +782,13 @@ function widget:Initialize()
 		Update = UpdateJob,
 		Delete = DeleteJob,
 		Assist = AssistJob,
+		GetCmdId = GetCmdId,
+		GetX = GetX,
+		GetY = GetY,
+		GetZ = GetZ,
+		GetH = GetH,
+		GetR = GetR,
+		GetTarget = GetTarget,
 		GetWorkerCount = GetWorkerCount,
 		GetReach = GetReach,
 		GetPriority = GetPriority,
