@@ -97,14 +97,14 @@ local res_color = {0.4, 0.8, 1.0, 1.0}
 -- Network protocol: "GBCQ|<type>|<seq>|<chunkIndex>|<chunkCount>|<data>"
 -- <type> is "F" (full snapshot) or "D" (delta). <data> is zero or more
 -- ';'-terminated records, each of one of two forms:
---   U,<hash>,<id>,<x>,<y>,<z>,<h>,<r>,<target>,<workers>   -- add/update a job
+--   U,<hash>,<cmdId>,<x>,<y>,<z>,<h>,<r>,<target>,<workers> -- add/update a job
 --   R,<hash>                                               -- remove a job
 -- A full snapshot ('F') contains only "U" records and replaces the receiver's
 -- entire stored queue for that sender. A delta ('D') applies its "U"/"R"
 -- records on top of whatever the receiver already has. Empty optional fields
 -- (h, r, target, workers) are encoded as "".
 --   hash    : a stable identifier for the job across calls (see SetLocalQueue)
---   id      : negative unitDefID for a build job, or CMD.REPAIR/RECLAIM/RESURRECT
+--   cmdId   : negative unitDefID for a build job, or CMD.REPAIR/RECLAIM/RESURRECT
 --   x, y, z : world position (for build jobs, area jobs, and cached feature positions)
 --   h       : build facing (0-3), build jobs only
 --   r       : area radius, area repair/reclaim/resurrect jobs only
@@ -134,7 +134,7 @@ local myPlayerID = spGetMyPlayerID()
 
 -- Our own queue, as given to us through the public API (see bottom of file),
 -- keyed by a stable per-job hash (see SetLocalQueue for where this comes from).
-local localJobId = {}
+local localCmdId = {}
 local localJobX = {}
 local localJobY = {}
 local localJobZ = {}
@@ -145,7 +145,7 @@ local localJobWorkers = {}
 
 -- What we last told everyone we have - the diff baseline - same layout as
 -- the localJob* set above, and always keyed the same way (by hash).
-local sentJobId = {}
+local sentCmdId = {}
 local sentJobX = {}
 local sentJobY = {}
 local sentJobZ = {}
@@ -163,7 +163,7 @@ local resyncTimer = 0
 -- hash alone, since two different players can otherwise end up with the
 -- exact same hash (eg. both queuing the same building at the same spot) and
 -- would then collide into a single entry.
-local jobId = {}
+local cmdId = {}
 local jobX = {}
 local jobY = {}
 local jobZ = {}
@@ -183,9 +183,9 @@ local pendingChunks = {} -- pendingChunks[playerID] = {type=, seq=, count=, part
 --------------------------------------------------------------------------------
 -- Encoding / Decoding ---------------------------------------------------------
 
-local function EncodeUpsert(hash, id, x, y, z, h, r, target, workers)
+local function EncodeUpsert(hash, cmdId, x, y, z, h, r, target, workers)
 	return "U," .. hash .. ","
-		.. (id or 0) .. ","
+		.. (cmdId or 0) .. ","
 		.. floor(x or 0) .. ","
 		.. floor(y or 0) .. ","
 		.. floor(z or 0) .. ","
@@ -208,13 +208,13 @@ local function DecodeRecord(record)
 	if op == "R" then
 		return "R", rest
 	elseif op == "U" then
-		local hash, id, x, y, z, h, r, target, workers =
+		local hash, cmdId, x, y, z, h, r, target, workers =
 			rest:match("^([^,]+),(-?%d+),(-?%d+),(-?%d+),(-?%d+),(%d*),(%d*),(%d*),(%d*)$")
 		if not hash then
 			return nil
 		end
 		return "U", hash,
-			tonumber(id), tonumber(x), tonumber(y), tonumber(z),
+			tonumber(cmdId), tonumber(x), tonumber(y), tonumber(z),
 			(h ~= "") and tonumber(h) or nil,
 			(r ~= "") and tonumber(r) or nil,
 			(target ~= "") and tonumber(target) or nil,
@@ -260,12 +260,12 @@ local function SendBatch(typeChar, records)
 end
 
 local function EncodeLocalUpsert(hash)
-	return EncodeUpsert(hash, localJobId[hash], localJobX[hash], localJobY[hash], localJobZ[hash],
+	return EncodeUpsert(hash, localCmdId[hash], localJobX[hash], localJobY[hash], localJobZ[hash],
 		localJobH[hash], localJobR[hash], localJobTarget[hash], localJobWorkers[hash])
 end
 
 local function CopyLocalJobToSent(hash)
-	sentJobId[hash] = localJobId[hash]
+	sentCmdId[hash] = localCmdId[hash]
 	sentJobX[hash] = localJobX[hash]
 	sentJobY[hash] = localJobY[hash]
 	sentJobZ[hash] = localJobZ[hash]
@@ -276,7 +276,7 @@ local function CopyLocalJobToSent(hash)
 end
 
 local function ClearSentJob(hash)
-	sentJobId[hash] = nil
+	sentCmdId[hash] = nil
 	sentJobX[hash] = nil
 	sentJobY[hash] = nil
 	sentJobZ[hash] = nil
@@ -287,8 +287,8 @@ local function ClearSentJob(hash)
 end
 
 local function LocalJobChanged(hash)
-	return sentJobId[hash] == nil
-		or sentJobId[hash] ~= localJobId[hash]
+	return sentCmdId[hash] == nil
+		or sentCmdId[hash] ~= localCmdId[hash]
 		or sentJobX[hash] ~= localJobX[hash]
 		or sentJobY[hash] ~= localJobY[hash]
 		or sentJobZ[hash] ~= localJobZ[hash]
@@ -300,7 +300,7 @@ end
 
 local function BroadcastFull()
 	local records = {}
-	for hash in pairs(localJobId) do
+	for hash in pairs(localCmdId) do
 		records[#records+1] = EncodeLocalUpsert(hash)
 	end
 	SendBatch("F", records)
@@ -308,12 +308,12 @@ local function BroadcastFull()
 	-- Reset the baseline to exactly match localJob*, mutating sentJob* in
 	-- place (clearing an existing field mid-traversal is safe per the Lua
 	-- manual; adding a new one isn't, which is why these stay separate loops).
-	for hash in pairs(sentJobId) do
-		if not localJobId[hash] then
+	for hash in pairs(sentCmdId) do
+		if not localCmdId[hash] then
 			ClearSentJob(hash)
 		end
 	end
-	for hash in pairs(localJobId) do
+	for hash in pairs(localCmdId) do
 		CopyLocalJobToSent(hash)
 	end
 end
@@ -323,14 +323,14 @@ end
 local function BroadcastDeltaIfChanged()
 	local records
 
-	for hash in pairs(sentJobId) do
-		if not localJobId[hash] then
+	for hash in pairs(sentCmdId) do
+		if not localCmdId[hash] then
 			records = records or {}
 			records[#records+1] = EncodeRemove(hash)
 			ClearSentJob(hash)
 		end
 	end
-	for hash in pairs(localJobId) do
+	for hash in pairs(localCmdId) do
 		if LocalJobChanged(hash) then
 			records = records or {}
 			records[#records+1] = EncodeLocalUpsert(hash)
@@ -349,7 +349,7 @@ end
 -- Receiving -----------------------------------------------------------------
 
 local function ClearReceivedJob(key)
-	jobId[key] = nil
+	cmdId[key] = nil
 	jobX[key] = nil
 	jobY[key] = nil
 	jobZ[key] = nil
@@ -370,11 +370,11 @@ local function ApplyRecordsData(playerID, teamID, isFull, data)
 	local newKeys = isFull and {} or nil
 
 	for record in data:gmatch("([^;]+);") do
-		local op, hash, id, x, y, z, h, r, target, workers = DecodeRecord(record)
+		local op, hash, decodedCmdId, x, y, z, h, r, target, workers = DecodeRecord(record)
 		if op then
 			local key = playerID .. "#" .. hash
 			if op == "U" then
-				jobId[key] = id
+				cmdId[key] = decodedCmdId
 				jobX[key] = x
 				jobY[key] = y
 				jobZ[key] = z
@@ -509,19 +509,19 @@ function widget:DrawWorldPreUnit()
 	end
 
 	glLineWidth(2)
-	for key, id in pairs(jobId) do
+	for key, cmdId in pairs(cmdId) do
 		local x, y, z = jobX[key], jobY[key], jobZ[key]
-		if id < 0 then -- build job outline
+		if cmdId < 0 then -- build job outline
 			if spIsAABBInView(x-1, y-1, z-1, x+1, y+1, z+1) then
 				glColor(1.0, 0.5, 0.1, 1)
-				glBeginEnd(GL_LINE_STRIP, DrawOutline, -id, x, y, z, jobH[key] or 0)
+				glBeginEnd(GL_LINE_STRIP, DrawOutline, -cmdId, x, y, z, jobH[key] or 0)
 			end
 		elseif not jobTarget[key] then -- area job circle
 			local r = jobR[key] or 0
 			if spIsSphereInView(x, y, z, r+25) then
-				if id == CMD_REPAIR then
+				if cmdId == CMD_REPAIR then
 					glColor(rep_color)
-				elseif id == CMD_RECLAIM then
+				elseif cmdId == CMD_RECLAIM then
 					glColor(rec_color)
 				else
 					glColor(res_color)
@@ -541,8 +541,8 @@ function widget:DrawWorld()
 
 	glDepthTest(true)
 	glColor(1, 1, 1, 0.4)
-	for key, id in pairs(jobId) do
-		if id < 0 then -- build job ghost
+	for key, cmdId in pairs(cmdId) do
+		if cmdId < 0 then -- build job ghost
 			local x, y, z, h = jobX[key], jobY[key], jobZ[key], jobH[key] or 0
 			if spIsAABBInView(x-1, y-1, z-1, x+1, y+1, z+1) then
 				local teamID = ownerTeamID[jobOwner[key]]
@@ -550,7 +550,7 @@ function widget:DrawWorld()
 				glLoadIdentity()
 				glTranslate(x, y, z)
 				glRotate(h * 90, 0, 1.0, 0)
-				glUnitShape(-id, teamID, false, false, false)
+				glUnitShape(-cmdId, teamID, false, false, false)
 				glPopMatrix()
 			end
 		end
@@ -558,9 +558,9 @@ function widget:DrawWorld()
 	glDepthTest(false)
 
 	glColor(1, 1, 1, 0.7)
-	for key, id in pairs(jobId) do
+	for key, cmdId in pairs(cmdId) do
 		local target = jobTarget[key]
-		if id >= 0 and target then -- single-target repair/reclaim/resurrect
+		if cmdId >= 0 and target then -- single-target repair/reclaim/resurrect
 			local x, y, z
 			if target >= Game.maxUnits then
 				if spValidFeatureID(target - Game.maxUnits) then
@@ -571,9 +571,9 @@ function widget:DrawWorld()
 			end
 			x, y, z = x or jobX[key], y or jobY[key], z or jobZ[key]
 			if x and spIsSphereInView(x, y, z, 100) then
-				if id == CMD_REPAIR then
+				if cmdId == CMD_REPAIR then
 					DrawIcon(rep_icon, x, y, z, 66)
-				elseif id == CMD_RECLAIM then
+				elseif cmdId == CMD_RECLAIM then
 					DrawIcon(rec_icon, x, y, z, 66)
 				else
 					DrawIcon(res_icon, x, y, z, 66)
@@ -591,7 +591,7 @@ end
 -- Public API ------------------------------------------------------------------
 
 local function ClearLocalJob(hash)
-	localJobId[hash] = nil
+	localCmdId[hash] = nil
 	localJobX[hash] = nil
 	localJobY[hash] = nil
 	localJobZ[hash] = nil
@@ -613,13 +613,13 @@ end
 -- fields documented in the network protocol comment above.
 local function SetLocalQueue(jobs)
 	jobs = jobs or {}
-	for hash in pairs(localJobId) do
+	for hash in pairs(localCmdId) do
 		if not jobs[hash] then
 			ClearLocalJob(hash)
 		end
 	end
 	for hash, job in pairs(jobs) do
-		localJobId[hash] = job.id
+		localCmdId[hash] = job.id
 		localJobX[hash] = job.x
 		localJobY[hash] = job.y
 		localJobZ[hash] = job.z
