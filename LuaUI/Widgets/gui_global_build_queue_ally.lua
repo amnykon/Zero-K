@@ -129,7 +129,6 @@ local res_color = {0.4, 0.8, 1.0, 1.0}
 -- one-off full send would otherwise be needed for: a widget enabled mid-game,
 -- which never received any of the deltas sent before it existed.
 local MSG_PREFIX = "GBCQ|"
-local DELTA_INTERVAL = 0.5 -- seconds between checks for changes to broadcast
 local MAX_UPDATES_PER_SEND = 50 -- caps how many changed hashes go out in one delta, so a big burst spreads over multiple sends rather than spiking that one frame's message count
 
 local myPlayerID = spGetMyPlayerID()
@@ -167,8 +166,6 @@ local jobOwner = {} -- jobOwner[key] = the owning playerID
 -- diff. Keyed by bare hash, not "<playerID>#<hash>", since it only ever
 -- tracks our own changes.
 local pendingStatus = {}
-
-local deltaTimer = 0
 
 -- Per-player bookkeeping. This is naturally one entry per player rather than
 -- per job, so it stays as a small dictionary. Gets one entry for us too (set
@@ -376,11 +373,7 @@ end
 -- Update -----------------------------------------------------------------
 
 function widget:Update(dt)
-	deltaTimer = deltaTimer + dt
-	if deltaTimer >= DELTA_INTERVAL then
-		deltaTimer = 0
-		BroadcastPending()
-	end
+	BroadcastPending()
 end
 
 --------------------------------------------------------------------------------
