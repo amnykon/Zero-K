@@ -20,13 +20,12 @@
 --  jobs, and worker assignment (Assist()) - this only exercises Update()/
 --  Delete(), the part of WG.GlobalBuildQueueShare that has no real GBC yet.
 --
---  Job identity is assigned by Update() itself (see gui_global_build_queue_
---  ally.lua), so this tool never computes anything like a hash - it just
---  keeps whatever jobId each Update() call hands back, to pass to Delete()
---  later. Note this means clicking the same spot twice queues two separate
---  overlapping jobs rather than replacing the first (right-drag over both
---  to clean up) - fine for a manual test tool, unlike a real GBC which
---  would want to recognize "the same job" across repeated calls itself.
+--  Job identity is derived by Update() itself from the job's own content
+--  (see gui_global_build_queue_ally.lua's BuildJobHash) - this tool never
+--  computes a hash itself, just keeps whatever jobId each Update() call
+--  hands back, to pass to Delete() later. Clicking the same spot with the
+--  same building again naturally updates that same job rather than
+--  queuing a duplicate, since it hashes to the same jobId both times.
 --
 --------------------------------------------------------------------------------
 --------------------------------------------------------------------------------
@@ -124,7 +123,7 @@ function widget:MousePress(x, y, button)
 			local x0, z0 = floor(mx), floor(mz)
 			local y0 = spGetGroundHeight(x0, z0)
 			if WG.GlobalBuildQueueShare then
-				local jobId = WG.GlobalBuildQueueShare.Update(nil, {id = activeCmdID, x = x0, y = y0, z = z0, h = 0})
+				local jobId = WG.GlobalBuildQueueShare.Update({id = activeCmdID, x = x0, y = y0, z = z0, h = 0})
 				myJobs[jobId] = {x = x0, z = z0}
 			end
 		end

@@ -16,10 +16,11 @@
 --  separate, later change. This file only implements the share/receive/draw
 --  side of the feature, plus its public API.
 --
---  Job identity is assigned by this widget, not the caller: Update() returns
---  a jobId (creating one if none is passed in), and the caller holds onto it
---  to update or delete that same job later. This widget doesn't care what a
---  job "means" to its caller, only that the id is stable across calls.
+--  Job identity is assigned by this widget, not the caller: Update() derives
+--  a jobId from the job's own content (BuildJobHash) and returns it. Two
+--  calls describing the same job - even unrelated code, even after a
+--  reload - always get the same jobId back, so there's no "hold onto a
+--  handle" bookkeeping and no separate "create" vs "update" case.
 --
 --------------------------------------------------------------------------------
 --------------------------------------------------------------------------------
@@ -119,10 +120,11 @@ local res_color = {0.4, 0.8, 1.0, 1.0}
 --   R,<jobId>                                                                 -- remove a job
 --   A,<ownerPlayerID>,<jobId>,<workers>                                        -- report an assist count
 -- Empty optional fields (h, r, target, reach, priority, unitID) are encoded as "".
---   jobId    : assigned by the owner's own widget (see UpdateJob), unique
---              among that one player's jobs only - always paired with an
---              ownerPlayerID (implicit as the sender for U/R, explicit for
---              A) to address a specific job, the same way a hash would.
+--   jobId    : a hash derived from the job's own identity-defining fields
+--              (see BuildJobHash below), computed by the owner's own widget -
+--              never the caller. Unique among that one player's jobs only,
+--              so always paired with an ownerPlayerID (implicit as the
+--              sender for U/R, explicit for A) to address a specific job.
 --   cmdId    : negative unitDefID for a build job, or CMD.REPAIR/RECLAIM/RESURRECT
 --   x, y, z  : world position (for build jobs, area jobs, and cached feature positions)
 --   h        : build facing (0-3), build jobs only
@@ -174,14 +176,6 @@ local MAX_UPDATES_PER_SEND = 50 -- caps how many changed jobs go out in one delt
 
 local myPlayerID = spGetMyPlayerID()
 
--- The next jobId UpdateJob() will assign when called without one. Seeded
--- from the current sim frame (see widget:Initialize()) rather than starting
--- at 1 every time, so a widget reload mid-game can't reissue a jobId one of
--- our earlier broadcasts already used - every other client would otherwise
--- silently treat a brand new job as an update to that old, unrelated one,
--- since from their side ownerPlayerID+jobId is all that identifies it.
-local nextJobId = 1
-
 -- Job data is stored as a separate flat dictionary per field (a "struct of
 -- arrays"), each keyed by job id, instead of one dictionary of small per-job
 -- tables. Lots of small short-lived tables is exactly the kind of thing that
@@ -191,11 +185,12 @@ local nextJobId = 1
 
 -- Every player's queue - ours included - lives in this one set of
 -- dictionaries, keyed by "<playerID>#<jobId>" rather than by jobId alone,
--- since two different players' jobIds aren't related to each other at all
--- (each player assigns their own, starting near 1) and would otherwise
--- collide into a single entry. Our own entries (owner == myPlayerID) are
--- written directly by UpdateJob/DeleteJob; everyone else's arrive over the
--- network via RecvLuaMsg/ApplyRecordsData.
+-- since jobId is a hash of a job's own content (see BuildJobHash) and two
+-- different players can independently produce the exact same one (eg. both
+-- queuing the same building at the same spot) - the playerID prefix is what
+-- keeps those from colliding into a single entry. Our own entries
+-- (owner == myPlayerID) are written directly by UpdateJob/DeleteJob;
+-- everyone else's arrive over the network via RecvLuaMsg/ApplyRecordsData.
 local cmdId = {}
 local jobX = {}
 local jobY = {}
@@ -233,8 +228,8 @@ local jobWorkersTotal = {}
 -- directly by the public API (see the bottom of this file) rather than by
 -- comparing against a second full copy of our own data every send tick - the
 -- caller already knows exactly when something changed, so there's nothing to
--- diff. Keyed by bare jobId (a number), not "<playerID>#<jobId>", since it
--- only ever tracks our own changes.
+-- diff. Keyed by bare jobId, not "<playerID>#<jobId>", since it only ever
+-- tracks our own changes.
 local pendingStatus = {}
 
 -- Same idea as pendingStatus, but for our own assist contributions: which
@@ -281,11 +276,11 @@ end
 -- not packed into a job table, to avoid allocating one per record decoded).
 local function DecodeUpsert(rest)
 	local jobId, cmdId, x, y, z, h, r, target, reach, priority, unitID =
-		rest:match("^(%d+),(-?%d+),(-?%d+),(-?%d+),(-?%d+),(%d*),(%d*),(%d*),(%d*),(%d*),(%d*)$")
+		rest:match("^([^,]+),(-?%d+),(-?%d+),(-?%d+),(-?%d+),(%d*),(%d*),(%d*),(%d*),(%d*),(%d*)$")
 	if not jobId then
 		return nil
 	end
-	return tonumber(jobId), tonumber(cmdId), tonumber(x), tonumber(y), tonumber(z),
+	return jobId, tonumber(cmdId), tonumber(x), tonumber(y), tonumber(z),
 		(h ~= "") and tonumber(h) or nil,
 		(r ~= "") and tonumber(r) or nil,
 		(target ~= "") and tonumber(target) or nil,
@@ -295,11 +290,11 @@ local function DecodeUpsert(rest)
 end
 
 local function DecodeAssist(rest)
-	local ownerPlayerID, jobId, workers = rest:match("^(%d+),(%d+),(%d+)$")
+	local ownerPlayerID, jobId, workers = rest:match("^(%d+),([^,]+),(%d+)$")
 	if not ownerPlayerID then
 		return nil
 	end
-	return tonumber(ownerPlayerID), tonumber(jobId), tonumber(workers)
+	return tonumber(ownerPlayerID), jobId, tonumber(workers)
 end
 
 --------------------------------------------------------------------------------
@@ -325,7 +320,7 @@ end
 -- Reads back our own current assist contribution to ownerKey, deriving the
 -- assist storage key the same way SetAssist does.
 local function EncodeLocalAssist(ownerKey)
-	local ownerPlayerID, jobId = ownerKey:match("^(%d+)#(%d+)$")
+	local ownerPlayerID, jobId = ownerKey:match("^(%d+)#(.+)$")
 	return EncodeAssist(ownerPlayerID, jobId, assistWorkers[ownerKey .. "#" .. myPlayerID])
 end
 
@@ -338,10 +333,7 @@ local function MarkAllOwnJobsPending()
 	local myKeyPrefix = myPlayerID .. "#"
 	for key, owner in pairs(jobOwner) do
 		if owner == myPlayerID then
-			-- tonumber() here matters: pendingStatus is keyed by the same
-			-- number type UpdateJob()/DeleteJob() use directly, and a string
-			-- substring of key wouldn't equal that number as a table key.
-			pendingStatus[tonumber(key:sub(#myKeyPrefix + 1))] = true
+			pendingStatus[key:sub(#myKeyPrefix + 1)] = true
 		end
 	end
 
@@ -712,28 +704,42 @@ end
 --------------------------------------------------------------------------------
 -- Public API ------------------------------------------------------------------
 
+-- Derives a job's identity purely from the fields that define what it IS,
+-- mirroring unit_global_build_command.lua's own BuildHash (which callers of
+-- this widget never need to know about or replicate themselves): a build
+-- job is defined by what's being built and where, a single-target repair/
+-- reclaim/resurrect job by its target, and an area one by its circle.
+-- Two calls describing the same job - even from unrelated code, even after
+-- a widget reload - always produce the same jobId, which is what lets
+-- UpdateJob() below have no separate "create" vs "update" case: calling it
+-- again for a job that already exists just naturally updates that same
+-- entry instead of creating a duplicate.
+local function BuildJobHash(job)
+	if job.id < 0 then -- build job: the site defines it
+		return job.id .. "@" .. floor(job.x or 0) .. "x" .. floor(job.z or 0)
+	elseif job.target then -- single-target repair/reclaim/resurrect: the target defines it
+		return job.id .. "@" .. job.target
+	else -- area repair/reclaim/resurrect: the circle defines it
+		return job.id .. "@" .. floor(job.x or 0) .. "x" .. floor(job.z or 0) .. "z" .. floor(job.r or 0) .. "r"
+	end
+end
+
 -- To be called (later, from unit_global_build_command.lua or similar)
 -- whenever it adds a job or changes one it already has. `job` must have the
 -- fields documented in the network protocol comment above (id, x, y, z, and
--- the optional h/r/target/reach/priority/unitID).
---
--- Unlike a caller-derived hash, jobId is assigned BY THIS WIDGET: pass nil to
--- create a new job (a fresh jobId is returned - hold onto it), or an
--- existing jobId to update that same job in place (returned back unchanged,
--- so the call always tells you which job it touched either way). GBC's own
--- `buildQueue[hash] = myCmd` becomes tracking the returned jobId itself
--- (eg. in its own per-command bookkeeping) instead of computing a hash.
+-- the optional h/r/target/reach/priority/unitID). Returns the jobId (see
+-- BuildJobHash above) - useful for a caller that wants to Delete()/Assist()
+-- this exact job later without recomputing the hash itself, though it never
+-- has to: calling Update() again with the same identity-defining fields
+-- always resolves back to the same job.
 --
 -- There's no "replace everything" call: a jobId sticks around until
 -- Delete() is called for it specifically, so every removal needs its own
 -- explicit Delete() call - eg. GBC's own `buildQueue[hash] = nil` needs a
 -- matching `WG.GlobalBuildQueueShare.Delete(jobId)` alongside it, not just
 -- the removal of the Lua table entry.
-local function UpdateJob(jobId, job)
-	if not jobId then
-		jobId = nextJobId
-		nextJobId = nextJobId + 1
-	end
+local function UpdateJob(job)
+	local jobId = BuildJobHash(job)
 	local key = myPlayerID .. "#" .. jobId
 	cmdId[key] = job.id
 	jobX[key] = job.x
@@ -835,8 +841,8 @@ local function GetJobByUnitID(unitID)
 	if not ownerKey then
 		return nil
 	end
-	local ownerPlayerID, jobId = ownerKey:match("^(%d+)#(%d+)$")
-	return tonumber(ownerPlayerID), tonumber(jobId)
+	local ownerPlayerID, jobId = ownerKey:match("^(%d+)#(.+)$")
+	return tonumber(ownerPlayerID), jobId
 end
 
 -- Returns an array of every jobId currently on file for ownerPlayerID (empty
@@ -851,7 +857,7 @@ local function GetJobIds(ownerPlayerID)
 	local jobIds = {}
 	for key, owner in pairs(jobOwner) do
 		if owner == ownerPlayerID then
-			jobIds[#jobIds+1] = tonumber(key:sub(#ownerPrefix + 1))
+			jobIds[#jobIds+1] = key:sub(#ownerPrefix + 1)
 		end
 	end
 	return jobIds
@@ -859,11 +865,6 @@ end
 
 function widget:Initialize()
 	myPlayerID = spGetMyPlayerID()
-	-- Seeds jobId assignment so a widget reload mid-game can't reissue one
-	-- of our own earlier jobIds (see nextJobId's declaration above) - the
-	-- sim frame only ever increases, and is the same for every client, so
-	-- this is safely higher than anything issued before this Initialize().
-	nextJobId = Spring.GetGameFrame() * 1000000 + 1
 	-- Ask everyone else to (re-)send their current queue, since we won't have
 	-- seen any of the deltas from before we existed (eg. this widget just got
 	-- enabled mid-game).
