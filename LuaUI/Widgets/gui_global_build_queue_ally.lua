@@ -125,6 +125,7 @@ local MAX_CHUNK_DATA_LEN = 800
 local DELTA_INTERVAL = 0.5 -- seconds between checks for changes to broadcast
 local RESYNC_INTERVAL = 30.0 -- seconds between unconditional full-snapshot resyncs
 local EXPIRE_TIME = 3 * RESYNC_INTERVAL -- time without any update before we drop a player's queue
+local MAX_UPDATES_PER_SEND = 50 -- caps how many changed hashes go out in one delta, so a big burst spreads over multiple sends rather than spiking that one frame's message count
 
 local myPlayerID = spGetMyPlayerID()
 
@@ -286,25 +287,31 @@ local function BroadcastFull()
 	pendingStatus = {}
 end
 
--- Drains whatever UpdateJob()/DeleteJob() have queued up since the last
--- send. Swaps in a fresh table up front rather than clearing this one in
--- place, so the batch we're about to encode can't be touched by any
--- UpdateJob()/DeleteJob() call that happens to run before we're done with it.
+-- Drains up to MAX_UPDATES_PER_SEND of whatever UpdateJob()/DeleteJob() have
+-- queued up since the last send, removing only the hashes actually included
+-- this time - anything past the cap just stays in pendingStatus for the next
+-- send to pick up (or gets overwritten first if it changes again before
+-- then), so one big burst spreads across multiple ticks instead of spiking a
+-- single frame's message count.
 local function BroadcastPending()
-	if next(pendingStatus) == nil then
-		return
-	end
-
-	local batch = pendingStatus
-	pendingStatus = {}
-
-	local records = {}
-	for hash, isUpdate in pairs(batch) do
+	local records
+	local sent = 0
+	for hash, isUpdate in pairs(pendingStatus) do
+		if sent >= MAX_UPDATES_PER_SEND then
+			break
+		end
+		records = records or {}
 		if isUpdate then
 			records[#records+1] = EncodeLocalUpsert(hash)
 		else
 			records[#records+1] = EncodeRemove(hash)
 		end
+		pendingStatus[hash] = nil
+		sent = sent + 1
+	end
+
+	if not records then
+		return
 	end
 	SendBatch("D", records)
 end
