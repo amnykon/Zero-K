@@ -110,16 +110,24 @@ local res_color = {0.4, 0.8, 1.0, 1.0}
 -- "GBCQ|<data>" - a delta. <data> is zero or more ';'-terminated records,
 -- applied on top of whatever the receiver already has, each of one of three
 -- forms:
---   U,<hash>,<cmdId>,<x>,<y>,<z>,<h>,<r>,<target> -- add/update a job
---   R,<hash>                                      -- remove a job
---   A,<ownerPlayerID>,<hash>,<workers>             -- report an assist count
--- Empty optional fields (h, r, target) are encoded as "".
+--   U,<hash>,<cmdId>,<x>,<y>,<z>,<h>,<r>,<target>,<reach> -- add/update a job
+--   R,<hash>                                              -- remove a job
+--   A,<ownerPlayerID>,<hash>,<workers>                     -- report an assist count
+-- Empty optional fields (h, r, target, reach) are encoded as "".
 --   hash    : a stable identifier for the job across calls (see UpdateJob/DeleteJob)
 --   cmdId   : negative unitDefID for a build job, or CMD.REPAIR/RECLAIM/RESURRECT
 --   x, y, z : world position (for build jobs, area jobs, and cached feature positions)
 --   h       : build facing (0-3), build jobs only
 --   r       : area radius, area repair/reclaim/resurrect jobs only
 --   target  : unit or feature ID (Game.maxUnits + featureID), single-target jobs only
+--   reach   : bitmask of which movers can reach the job's spot - bit 0 (1) air,
+--             bit 1 (2) water, bit 2 (4) spider, bit 3 (8) slope/bot, matching
+--             cmd_spot_reach_flags.lua's REACH_TYPES.allows on the energyGrid
+--             branch. 0 means no mover can reach it (that widget's "none"
+--             flag); absent means unrestricted (its "all"/default). This is
+--             the job's own reach as its owner assessed it, not something
+--             recomputed locally per ally - allies may not have flagged the
+--             same spots themselves.
 --
 -- A job's worker count isn't part of the job record itself - it's the sum of
 -- however many workers each interested player (the owner included) reports
@@ -165,6 +173,7 @@ local jobZ = {}
 local jobH = {}
 local jobR = {}
 local jobTarget = {}
+local jobReach = {} -- bitmask of movers that can reach the job's spot, or nil for unrestricted (see the network protocol comment above)
 local jobOwner = {} -- jobOwner[key] = the owning playerID
 
 -- How many workers each player has individually assigned to a given job,
@@ -199,7 +208,7 @@ local pendingAssist = {}
 --------------------------------------------------------------------------------
 -- Encoding / Decoding ---------------------------------------------------------
 
-local function EncodeUpsert(hash, cmdId, x, y, z, h, r, target)
+local function EncodeUpsert(hash, cmdId, x, y, z, h, r, target, reach)
 	return "U," .. hash .. ","
 		.. (cmdId or 0) .. ","
 		.. floor(x or 0) .. ","
@@ -207,7 +216,8 @@ local function EncodeUpsert(hash, cmdId, x, y, z, h, r, target)
 		.. floor(z or 0) .. ","
 		.. (h and floor(h) or "") .. ","
 		.. (r and floor(r) or "") .. ","
-		.. (target and floor(target) or "")
+		.. (target and floor(target) or "") .. ","
+		.. (reach and floor(reach) or "")
 		.. ";"
 end
 
@@ -229,15 +239,16 @@ end
 -- Returns the decoded scalar fields for a "U" record's rest (deliberately
 -- not packed into a job table, to avoid allocating one per record decoded).
 local function DecodeUpsert(rest)
-	local hash, cmdId, x, y, z, h, r, target =
-		rest:match("^([^,]+),(-?%d+),(-?%d+),(-?%d+),(-?%d+),(%d*),(%d*),(%d*)$")
+	local hash, cmdId, x, y, z, h, r, target, reach =
+		rest:match("^([^,]+),(-?%d+),(-?%d+),(-?%d+),(-?%d+),(%d*),(%d*),(%d*),(%d*)$")
 	if not hash then
 		return nil
 	end
 	return hash, tonumber(cmdId), tonumber(x), tonumber(y), tonumber(z),
 		(h ~= "") and tonumber(h) or nil,
 		(r ~= "") and tonumber(r) or nil,
-		(target ~= "") and tonumber(target) or nil
+		(target ~= "") and tonumber(target) or nil,
+		(reach ~= "") and tonumber(reach) or nil
 end
 
 local function DecodeAssist(rest)
@@ -265,7 +276,7 @@ end
 local function EncodeLocalUpsert(hash)
 	local key = myPlayerID .. "#" .. hash
 	return EncodeUpsert(hash, cmdId[key], jobX[key], jobY[key], jobZ[key],
-		jobH[key], jobR[key], jobTarget[key])
+		jobH[key], jobR[key], jobTarget[key], jobReach[key])
 end
 
 -- Reads back our own current assist contribution to ownerKey, deriving the
@@ -373,6 +384,7 @@ local function ClearJob(key)
 	jobH[key] = nil
 	jobR[key] = nil
 	jobTarget[key] = nil
+	jobReach[key] = nil
 	jobOwner[key] = nil
 	jobWorkersTotal[key] = nil
 	local prefix = key .. "#"
@@ -387,7 +399,7 @@ local function ApplyRecordsData(playerID, data)
 	for record in data:gmatch("([^;]+);") do
 		local op, rest = DecodeRecord(record)
 		if op == "U" then
-			local hash, decodedCmdId, x, y, z, h, r, target = DecodeUpsert(rest)
+			local hash, decodedCmdId, x, y, z, h, r, target, reach = DecodeUpsert(rest)
 			if hash then
 				local key = playerID .. "#" .. hash
 				cmdId[key] = decodedCmdId
@@ -397,6 +409,7 @@ local function ApplyRecordsData(playerID, data)
 				jobH[key] = h
 				jobR[key] = r
 				jobTarget[key] = target
+				jobReach[key] = reach
 				jobOwner[key] = playerID
 			end
 		elseif op == "R" then
@@ -636,8 +649,8 @@ end
 -- whenever it adds a job or changes one it already has - eg. GBC's own
 -- `buildQueue[hash] = myCmd` becomes `WG.GlobalBuildQueueShare.Update(hash,
 -- myCmd)`. `job` must have the fields documented in the network protocol
--- comment above (id, x, y, z, and the optional h/r/target). `hash` must be a
--- stable identifier for this exact job across calls (GBC's own
+-- comment above (id, x, y, z, and the optional h/r/target/reach). `hash`
+-- must be a stable identifier for this exact job across calls (GBC's own
 -- BuildHash(cmd) already is one).
 --
 -- There's no "replace everything" call: a hash sticks around until Delete()
@@ -654,6 +667,7 @@ local function UpdateJob(hash, job)
 	jobH[key] = job.h
 	jobR[key] = job.r
 	jobTarget[key] = job.target
+	jobReach[key] = job.reach
 	jobOwner[key] = myPlayerID
 	pendingStatus[hash] = true
 end
@@ -685,6 +699,14 @@ local function GetWorkerCount(ownerPlayerID, hash)
 	return jobWorkersTotal[ownerPlayerID .. "#" .. hash] or 0
 end
 
+-- Returns the reach bitmask the job's owner set via Update() (see the
+-- network protocol comment above for the bit layout), or nil if the job is
+-- unrestricted or doesn't exist - another factor for an AI deciding what a
+-- worker should work on next, alongside GetWorkerCount().
+local function GetReach(ownerPlayerID, hash)
+	return jobReach[ownerPlayerID .. "#" .. hash]
+end
+
 function widget:Initialize()
 	myPlayerID = spGetMyPlayerID()
 	-- Ask everyone else to (re-)send their current queue, since we won't have
@@ -697,6 +719,7 @@ function widget:Initialize()
 		Delete = DeleteJob,
 		Assist = AssistJob,
 		GetWorkerCount = GetWorkerCount,
+		GetReach = GetReach,
 	}
 end
 
