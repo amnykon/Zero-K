@@ -2,11 +2,13 @@
 --------------------------------------------------------------------------------
 --
 --  file:    gui_global_build_queue_ally.lua
---  brief:   Shows allied players' (and, for spectators, everyone's) Global Build
---           Command queue jobs.
+--  brief:   Shows the local player's own Global Build Command queue, allied
+--           players' queues, and (for spectators) everyone's queue.
 --
 --  Unlike "Global Build Command" itself, this widget is on by default: it only
---  displays information, and never touches anyone's units.
+--  displays information, and never touches anyone's units. GBC itself no
+--  longer draws its own queue - this widget replaces that display for the
+--  local player too, not just for allies/spectators.
 --
 --  Note: This widget currently has nothing to display, because nothing calls
 --  WG.GlobalBuildQueueShare.SetLocalQueue() yet. That hookup into
@@ -19,12 +21,12 @@
 
 function widget:GetInfo()
 	return {
-		name      = "Global Build Queue (Ally View)",
-		desc      = "Shows allied players' Global Build Command queues (and, for spectators, every player's). Nothing to see yet unless something calls the SetLocalQueue API.",
+		name      = "Global Build Queue",
+		desc      = "Shows your own Global Build Command queue, allied players' queues, and (for spectators) every player's queue. Nothing to see yet unless something calls the SetLocalQueue API.",
 		author    = "amnykon",
 		date      = "September 25, 2026",
 		license   = "GNU GPL, v2 or later",
-		layer     = 11, -- after unit_global_build_command.lua's own drawing (layer 10)
+		layer     = 11, -- draws after unit_global_build_command.lua (layer 10)
 		enabled   = true, -- on by default, since it's pure information
 	}
 end
@@ -52,6 +54,7 @@ options = {
 
 -- "Localized" API calls, because they run ~33% faster in lua.
 local spGetMyPlayerID       = Spring.GetMyPlayerID
+local spGetMyTeamID         = Spring.GetMyTeamID
 local spGetPlayerInfo       = Spring.GetPlayerInfo
 local spSendLuaUIMsg        = Spring.SendLuaUIMsg
 local spGetUnitPosition     = Spring.GetUnitPosition
@@ -503,32 +506,81 @@ local function ShouldShow()
 	return shift
 end
 
+-- The three helpers below hold the actual GL drawing logic for one job, so
+-- that our own queue (localCmdId/localJobX/...) and everyone else's queues
+-- (cmdId/jobX/... keyed by "<playerID>#<hash>") can share it: they're stored
+-- separately (see the comments where those dictionaries are declared), but
+-- there's no reason the drawing code should be duplicated for each source.
+
+local function DrawJobOutline(cmdId, x, y, z, h, r, target)
+	if cmdId < 0 then -- build job outline
+		if spIsAABBInView(x-1, y-1, z-1, x+1, y+1, z+1) then
+			glColor(1.0, 0.5, 0.1, 1)
+			glBeginEnd(GL_LINE_STRIP, DrawOutline, -cmdId, x, y, z, h or 0)
+		end
+	elseif not target then -- area job circle
+		r = r or 0
+		if spIsSphereInView(x, y, z, r+25) then
+			if cmdId == CMD_REPAIR then
+				glColor(rep_color)
+			elseif cmdId == CMD_RECLAIM then
+				glColor(rec_color)
+			else
+				glColor(res_color)
+			end
+			glGroundCircle(x, y, z, r, 32)
+		end
+	end
+end
+
+local function DrawJobGhost(cmdId, x, y, z, h, teamID)
+	if cmdId < 0 then -- build job ghost
+		if spIsAABBInView(x-1, y-1, z-1, x+1, y+1, z+1) then
+			glPushMatrix()
+			glLoadIdentity()
+			glTranslate(x, y, z)
+			glRotate((h or 0) * 90, 0, 1.0, 0)
+			glUnitShape(-cmdId, teamID, false, false, false)
+			glPopMatrix()
+		end
+	end
+end
+
+local function DrawJobIcon(cmdId, x, y, z, target)
+	if cmdId >= 0 and target then -- single-target repair/reclaim/resurrect
+		local ix, iy, iz
+		if target >= Game.maxUnits then
+			if spValidFeatureID(target - Game.maxUnits) then
+				ix, iy, iz = spGetFeaturePosition(target - Game.maxUnits)
+			end
+		elseif spValidUnitID(target) then
+			ix, iy, iz = spGetUnitPosition(target)
+		end
+		ix, iy, iz = ix or x, iy or y, iz or z
+		if spIsSphereInView(ix, iy, iz, 100) then
+			if cmdId == CMD_REPAIR then
+				DrawIcon(rep_icon, ix, iy, iz, 66)
+			elseif cmdId == CMD_RECLAIM then
+				DrawIcon(rec_icon, ix, iy, iz, 66)
+			else
+				DrawIcon(res_icon, ix, iy, iz, 66)
+			end
+		end
+	end
+end
+
 function widget:DrawWorldPreUnit()
 	if not ShouldShow() then
 		return
 	end
 
 	glLineWidth(2)
-	for key, cmdId in pairs(cmdId) do
-		local x, y, z = jobX[key], jobY[key], jobZ[key]
-		if cmdId < 0 then -- build job outline
-			if spIsAABBInView(x-1, y-1, z-1, x+1, y+1, z+1) then
-				glColor(1.0, 0.5, 0.1, 1)
-				glBeginEnd(GL_LINE_STRIP, DrawOutline, -cmdId, x, y, z, jobH[key] or 0)
-			end
-		elseif not jobTarget[key] then -- area job circle
-			local r = jobR[key] or 0
-			if spIsSphereInView(x, y, z, r+25) then
-				if cmdId == CMD_REPAIR then
-					glColor(rep_color)
-				elseif cmdId == CMD_RECLAIM then
-					glColor(rec_color)
-				else
-					glColor(res_color)
-				end
-				glGroundCircle(x, y, z, r, 32)
-			end
-		end
+	for hash, localCmdIdValue in pairs(localCmdId) do
+		DrawJobOutline(localCmdIdValue, localJobX[hash], localJobY[hash], localJobZ[hash],
+			localJobH[hash], localJobR[hash], localJobTarget[hash])
+	end
+	for key, cmdIdValue in pairs(cmdId) do
+		DrawJobOutline(cmdIdValue, jobX[key], jobY[key], jobZ[key], jobH[key], jobR[key], jobTarget[key])
 	end
 	glColor(1, 1, 1, 1)
 	glLineWidth(1)
@@ -539,47 +591,24 @@ function widget:DrawWorld()
 		return
 	end
 
+	local myTeamID = spGetMyTeamID()
+
 	glDepthTest(true)
 	glColor(1, 1, 1, 0.4)
-	for key, cmdId in pairs(cmdId) do
-		if cmdId < 0 then -- build job ghost
-			local x, y, z, h = jobX[key], jobY[key], jobZ[key], jobH[key] or 0
-			if spIsAABBInView(x-1, y-1, z-1, x+1, y+1, z+1) then
-				local teamID = ownerTeamID[jobOwner[key]]
-				glPushMatrix()
-				glLoadIdentity()
-				glTranslate(x, y, z)
-				glRotate(h * 90, 0, 1.0, 0)
-				glUnitShape(-cmdId, teamID, false, false, false)
-				glPopMatrix()
-			end
-		end
+	for hash, localCmdIdValue in pairs(localCmdId) do
+		DrawJobGhost(localCmdIdValue, localJobX[hash], localJobY[hash], localJobZ[hash], localJobH[hash], myTeamID)
+	end
+	for key, cmdIdValue in pairs(cmdId) do
+		DrawJobGhost(cmdIdValue, jobX[key], jobY[key], jobZ[key], jobH[key], ownerTeamID[jobOwner[key]])
 	end
 	glDepthTest(false)
 
 	glColor(1, 1, 1, 0.7)
-	for key, cmdId in pairs(cmdId) do
-		local target = jobTarget[key]
-		if cmdId >= 0 and target then -- single-target repair/reclaim/resurrect
-			local x, y, z
-			if target >= Game.maxUnits then
-				if spValidFeatureID(target - Game.maxUnits) then
-					x, y, z = spGetFeaturePosition(target - Game.maxUnits)
-				end
-			elseif spValidUnitID(target) then
-				x, y, z = spGetUnitPosition(target)
-			end
-			x, y, z = x or jobX[key], y or jobY[key], z or jobZ[key]
-			if x and spIsSphereInView(x, y, z, 100) then
-				if cmdId == CMD_REPAIR then
-					DrawIcon(rep_icon, x, y, z, 66)
-				elseif cmdId == CMD_RECLAIM then
-					DrawIcon(rec_icon, x, y, z, 66)
-				else
-					DrawIcon(res_icon, x, y, z, 66)
-				end
-			end
-		end
+	for hash, localCmdIdValue in pairs(localCmdId) do
+		DrawJobIcon(localCmdIdValue, localJobX[hash], localJobY[hash], localJobZ[hash], localJobTarget[hash])
+	end
+	for key, cmdIdValue in pairs(cmdId) do
+		DrawJobIcon(cmdIdValue, jobX[key], jobY[key], jobZ[key], jobTarget[key])
 	end
 
 	glTexture(false)
