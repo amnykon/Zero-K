@@ -20,6 +20,14 @@
 --  jobs, and worker assignment (Assist()) - this only exercises Update()/
 --  Delete(), the part of WG.GlobalBuildQueueShare that has no real GBC yet.
 --
+--  Job identity is assigned by Update() itself (see gui_global_build_queue_
+--  ally.lua), so this tool never computes anything like a hash - it just
+--  keeps whatever jobId each Update() call hands back, to pass to Delete()
+--  later. Note this means clicking the same spot twice queues two separate
+--  overlapping jobs rather than replacing the first (right-drag over both
+--  to clean up) - fine for a manual test tool, unlike a real GBC which
+--  would want to recognize "the same job" across repeated calls itself.
+--
 --------------------------------------------------------------------------------
 --------------------------------------------------------------------------------
 
@@ -50,20 +58,15 @@ local function DistanceSq(x1, z1, x2, z2)
 	return (x1 - x2) * (x1 - x2) + (z1 - z2) * (z1 - z2)
 end
 
--- Mirrors unit_global_build_command.lua's own BuildHash for build orders
--- exactly ("id@x,z"), so jobs this tool creates look like the real thing.
-local function BuildHash(unitDefID, x, z)
-	return unitDefID .. "@" .. x .. "x" .. z
-end
-
 --------------------------------------------------------------------------------
 -- State
 --------------------------------------------------------------------------------
 
 local active = false -- test mode on/off, toggled by Tab
 
--- Every job this tool has queued (hash -> {x, z}), so a right-drag knows
--- what it's allowed to remove without touching anything else's jobs.
+-- Every job this tool has queued (jobId -> {x, z}), so a right-drag knows
+-- what it's allowed to remove without touching anything else's jobs. jobId
+-- is whatever Update() below assigned - this tool never computes one itself.
 local myJobs = {}
 
 local dragX, dragZ, dragR -- in-progress right-drag for area removal
@@ -119,11 +122,10 @@ function widget:MousePress(x, y, button)
 		local mx, mz = mousePos()
 		if mx then
 			local x0, z0 = floor(mx), floor(mz)
-			local hash = BuildHash(activeCmdID, x0, z0)
 			local y0 = spGetGroundHeight(x0, z0)
 			if WG.GlobalBuildQueueShare then
-				WG.GlobalBuildQueueShare.Update(hash, {id = activeCmdID, x = x0, y = y0, z = z0, h = 0})
-				myJobs[hash] = {x = x0, z = z0}
+				local jobId = WG.GlobalBuildQueueShare.Update(nil, {id = activeCmdID, x = x0, y = y0, z = z0, h = 0})
+				myJobs[jobId] = {x = x0, z = z0}
 			end
 		end
 		return true -- consumed either way, so a real selected unit never gets a real build order
@@ -155,10 +157,10 @@ function widget:MouseRelease(x, y, button)
 	end
 	if WG.GlobalBuildQueueShare then
 		local rSq = dragR * dragR
-		for hash, pos in pairs(myJobs) do
+		for jobId, pos in pairs(myJobs) do
 			if DistanceSq(dragX, dragZ, pos.x, pos.z) <= rSq then
-				WG.GlobalBuildQueueShare.Delete(hash)
-				myJobs[hash] = nil
+				WG.GlobalBuildQueueShare.Delete(jobId)
+				myJobs[jobId] = nil
 			end
 		end
 	end
