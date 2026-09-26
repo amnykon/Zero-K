@@ -321,28 +321,40 @@ local function BroadcastFull()
 	end
 end
 
--- The records list is only allocated once we know there's actually something
--- to send, since most ticks have no changes at all.
+-- Which hashes need an upsert or a removal this tick. Reused and cleared in
+-- place every tick (table.clear() is a Spring extension, also used by GBC
+-- itself) rather than reallocated, so naming the two sets explicitly doesn't
+-- bring back the per-tick table churn we removed earlier.
+local jobsToUpdate = {}
+local jobsToDelete = {}
+
 local function BroadcastDeltaIfChanged()
-	local records
+	table.clear(jobsToUpdate)
+	table.clear(jobsToDelete)
 
 	for hash in pairs(sentCmdId) do
 		if not localCmdId[hash] then
-			records = records or {}
-			records[#records+1] = EncodeRemove(hash)
-			ClearSentJob(hash)
+			jobsToDelete[hash] = true
 		end
 	end
 	for hash in pairs(localCmdId) do
 		if LocalJobChanged(hash) then
-			records = records or {}
-			records[#records+1] = EncodeLocalUpsert(hash)
-			CopyLocalJobToSent(hash)
+			jobsToUpdate[hash] = true
 		end
 	end
 
-	if not records then
+	if next(jobsToUpdate) == nil and next(jobsToDelete) == nil then
 		return
+	end
+
+	local records = {}
+	for hash in pairs(jobsToDelete) do
+		records[#records+1] = EncodeRemove(hash)
+		ClearSentJob(hash)
+	end
+	for hash in pairs(jobsToUpdate) do
+		records[#records+1] = EncodeLocalUpsert(hash)
+		CopyLocalJobToSent(hash)
 	end
 	SendBatch("D", records)
 end
