@@ -839,6 +839,24 @@ local function GetJobByUnitID(unitID)
 	return tonumber(ownerPlayerID), tonumber(jobId)
 end
 
+-- Returns an array of every jobId currently on file for ownerPlayerID (empty
+-- if they have none), in no particular order. The only way to discover a
+-- job without already knowing its jobId - eg. for an AI weighing whether one
+-- of its own workers should help build something on an ally's queue, which
+-- needs to see that queue's jobs at all before it can cost any of them.
+-- Every other Get* function above is a point lookup by (ownerPlayerID,
+-- jobId); this is the one enumeration this widget exposes.
+local function GetJobIds(ownerPlayerID)
+	local ownerPrefix = ownerPlayerID .. "#"
+	local jobIds = {}
+	for key, owner in pairs(jobOwner) do
+		if owner == ownerPlayerID then
+			jobIds[#jobIds+1] = tonumber(key:sub(#ownerPrefix + 1))
+		end
+	end
+	return jobIds
+end
+
 function widget:Initialize()
 	myPlayerID = spGetMyPlayerID()
 	-- Seeds jobId assignment so a widget reload mid-game can't reissue one
@@ -867,6 +885,7 @@ function widget:Initialize()
 		GetPriority = GetPriority,
 		GetUnitID = GetUnitID,
 		GetJobByUnitID = GetJobByUnitID,
+		GetJobIds = GetJobIds,
 	}
 end
 
