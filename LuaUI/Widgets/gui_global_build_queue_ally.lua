@@ -120,11 +120,12 @@ local res_color = {0.4, 0.8, 1.0, 1.0}
 --   h       : build facing (0-3), build jobs only
 --   r       : area radius, area repair/reclaim/resurrect jobs only
 --   target  : unit or feature ID (Game.maxUnits + featureID), single-target jobs only
---   reach   : bitmask of which movers can reach the job's spot - bit 0 (1) air,
---             bit 1 (2) water, bit 2 (4) spider, bit 3 (8) slope/bot, matching
---             cmd_spot_reach_flags.lua's REACH_TYPES.allows on the energyGrid
---             branch. 0 means no mover can reach it (that widget's "none"
---             flag); absent means unrestricted (its "all"/default). This is
+--   reach   : which movers can reach the job's spot, as a small enum matching
+--             cmd_spot_reach_flags.lua's REACH_TYPES *keys* on the energyGrid
+--             branch (matched by key, not that array's position, since it can
+--             be reordered/extended independently of this file):
+--               0 = none, 1 = air, 2 = water, 3 = spider, 4 = slope, 5 = land
+--             absent means unrestricted (that widget's "all"/default). This is
 --             the job's own reach as its owner assessed it, not something
 --             recomputed locally per ally - allies may not have flagged the
 --             same spots themselves.
@@ -173,7 +174,7 @@ local jobZ = {}
 local jobH = {}
 local jobR = {}
 local jobTarget = {}
-local jobReach = {} -- bitmask of movers that can reach the job's spot, or nil for unrestricted (see the network protocol comment above)
+local jobReach = {} -- reach enum for the job's spot, or nil for unrestricted (see the network protocol comment above)
 local jobOwner = {} -- jobOwner[key] = the owning playerID
 
 -- How many workers each player has individually assigned to a given job,
@@ -699,10 +700,10 @@ local function GetWorkerCount(ownerPlayerID, hash)
 	return jobWorkersTotal[ownerPlayerID .. "#" .. hash] or 0
 end
 
--- Returns the reach bitmask the job's owner set via Update() (see the
--- network protocol comment above for the bit layout), or nil if the job is
--- unrestricted or doesn't exist - another factor for an AI deciding what a
--- worker should work on next, alongside GetWorkerCount().
+-- Returns the reach enum value the job's owner set via Update() (see the
+-- network protocol comment above for what each value means), or nil if the
+-- job is unrestricted or doesn't exist - another factor for an AI deciding
+-- what a worker should work on next, alongside GetWorkerCount().
 local function GetReach(ownerPlayerID, hash)
 	return jobReach[ownerPlayerID .. "#" .. hash]
 end
