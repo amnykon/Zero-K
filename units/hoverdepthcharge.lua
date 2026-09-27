@@ -88,6 +88,8 @@ return { hoverdepthcharge = {
       cegTag                  = [[torpedo_trail]],
 
       customParams = {
+        weapon_class = "explosive",
+        icon = [[unitpics/commweapon_torpedo.png]],
         burst = Shared.BURST_UNRELIABLE,
         no_muzzleshock = 1,
       },
@@ -171,6 +173,10 @@ return { hoverdepthcharge = {
       tracks                  = false,
       turnRate                = 0,
       turret                  = true,
+      customParams = {
+        weapon_class = "explosive",
+        icon = [[unitpics/commweapon_missilelauncher.png]],
+      },
       weaponType              = [[Cannon]],
       weaponVelocity          = 400,
     },
@@ -183,6 +189,8 @@ return { hoverdepthcharge = {
       craterMult              = 0,
 
       customParams            = {
+        weapon_class = "explosive",
+        icon = [[unitpics/commweapon_missilelauncher.png]],
         bogus = 1,
         lups_noshockwave = 1,
         no_muzzleshock = 1,

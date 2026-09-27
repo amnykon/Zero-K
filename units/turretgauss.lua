@@ -77,6 +77,8 @@ return { turretgauss = {
       craterMult              = 0,
 
       customParams = {
+        weapon_class = "kinetic",
+        icon = [[unitpics/commweapon_gaussrifle.png]],
         burst = Shared.BURST_RELIABLE,
 
         single_hit = true,
