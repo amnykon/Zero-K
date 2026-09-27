@@ -92,6 +92,10 @@ local spGetMyAllyTeamID   = Spring.GetMyAllyTeamID
 local spAreTeamsAllied    = Spring.AreTeamsAllied
 local spGetTeamResources  = Spring.GetTeamResources
 local spGetUnitIsBuilding = Spring.GetUnitIsBuilding
+local spGetUnitsInCylinder = Spring.GetUnitsInCylinder
+local spIsUnitAllied      = Spring.IsUnitAllied
+local spGetUnitBuildFacing = Spring.GetUnitBuildFacing
+local spPos2BuildPos      = Spring.Pos2BuildPos
 
 local CMD_REPAIR    = CMD.REPAIR
 local CMD_RECLAIM   = CMD.RECLAIM
@@ -210,6 +214,8 @@ options_order = {
 	'allyJobCost', 'waitingBonusPerMinute', 'waitingBonusMax', 'commanderTravelFactor',
 	'metalNeedBonus', 'energyNeedBonus', 'productionNeedBonus',
 	'assistFactories', 'econShare', 'splitWeight', 'factoryAssistPreferred', 'steerPriority',
+	'dangerRadius', 'dangerPerEnemy', 'dangerMax', 'defenceNearEnemyBonus',
+	'autoCaretakers', 'autoCaretakersIdleFactories', 'maxCaretakersPerFactory',
 	'lowPriorityCost', 'highPriorityDiscount',
 }
 options = {
@@ -351,6 +357,37 @@ options = {
 		type = 'bool',
 		value = true,
 		noHotkey = true,
+	},
+	dangerRadius = {
+		name = 'Danger radius (elmos)',
+		desc = 'Armed enemy units (and unidentified radar dots) within this distance of a job make it dangerous.',
+		type = 'number', min = 100, max = 2000, step = 50, value = 600,
+		path = COSTS_PATH,
+	},
+	dangerPerEnemy = CostOption('Danger cost per enemy',
+		'Added to a job for each armed enemy near it, up to the maximum. Not for defences.', 10),
+	dangerMax = CostOption('Danger cost: maximum',
+		'The most danger can add to a job\'s cost.', 60, 300),
+	defenceNearEnemyBonus = CostOption('Defence near enemies bonus',
+		'Taken off building a defence (an armed building, other than a large project) when enemies are near it, instead of the danger cost - that\'s where it\'s needed.', 10),
+	autoCaretakers = {
+		name = 'Auto-build caretakers',
+		desc = 'While metal is high (see High metal), queue caretakers beside your producing factories, up to a number per factory. They are ordinary GBC jobs: shown, and removable like any other.',
+		type = 'bool',
+		value = true,
+		noHotkey = true,
+	},
+	autoCaretakersIdleFactories = {
+		name = 'Auto-build caretakers: idle factories too',
+		desc = 'Also queue caretakers beside factories that aren\'t producing anything.',
+		type = 'bool',
+		value = false,
+		noHotkey = true,
+	},
+	maxCaretakersPerFactory = {
+		name = 'Auto-build caretakers: per factory',
+		desc = 'How many caretakers (built or queued) to have beside each factory.',
+		type = 'number', min = 1, max = 20, step = 1, value = 4,
 	},
 	lowPriorityCost = CostOption('Low priority job cost',
 		'Added to jobs marked low priority.', 15),
@@ -502,6 +539,8 @@ end
 --   - resource need: mexes get cheaper the lower metal is, energy the lower
 --     energy is, and caretakers, factories and helping factories the higher
 --     metal is (not enough build power to spend it).
+--   - danger: jobs with armed enemies near them cost more - except
+--     defences, which get cheaper there, since that's where they're needed.
 --   - economy vs units: workers can also help (guard) our producing
 --     factories. Economy jobs (mexes, energy, storage, pylons) get cheaper
 --     and helping factories dearer while economy is behind its share of build
@@ -673,6 +712,32 @@ local function BuildCategory(unitDef)
 	return nil, storage or (cp.pylonrange ~= nil)
 end
 
+-- Whether a building is a defence: armed, and not a large project (so not a
+-- superweapon).
+local function IsDefence(unitDef)
+	return unitDef and unitDef.isImmobile and unitDef.weapons and #unitDef.weapons > 0
+		and (unitDef.metalCost or 0) < options.largeMinMetal.value
+end
+
+-- How many armed enemies (or unidentified radar dots) are near a spot.
+local function DangerAt(x, z)
+	local units = spGetUnitsInCylinder(x, z, options.dangerRadius.value)
+	local count = 0
+	if units then
+		for i = 1, #units do
+			local unitID = units[i]
+			if not spIsUnitAllied(unitID) then
+				local unitDefID = spGetUnitDefID(unitID)
+				local ud = unitDefID and UnitDefs[unitDefID]
+				if not ud or (ud.weapons and #ud.weapons > 0) then
+					count = count + 1
+				end
+			end
+		end
+	end
+	return count
+end
+
 -- How many workers a job wants: enough workers of average build power to
 -- build it in the target finish time. From the whole build time, so it
 -- doesn't change as the job progresses.
@@ -744,6 +809,8 @@ local function CollectJobs(share, avgBuildPower, frame)
 						waitingBonus = waitingBonus,
 						produces = produces,
 						econ = econ,
+						defence = cmd < 0 and IsDefence(unitDef),
+						danger = DangerAt(x, z),
 						key = key, owner = owner, jobId = jobId, cmd = cmd,
 						x = x, y = share.GetY(owner, jobId), z = z,
 						h = share.GetH(owner, jobId), r = share.GetR(owner, jobId),
@@ -776,6 +843,7 @@ local function CollectJobs(share, avgBuildPower, frame)
 						preferred = options.factoryAssistPreferred.value,
 						others = 0, waitingBonus = 0,
 						factoryAssist = true,
+						danger = DangerAt(fx, fz),
 					}
 				end
 			end
@@ -983,6 +1051,14 @@ local function JobCost(wx, wz, speed, buildDistance, job, currentKey, travelFact
 		cost = cost - options.productionNeedBonus.value * metalHigh
 	end
 
+	if job.danger > 0 then
+		if job.defence then
+			cost = cost - options.defenceNearEnemyBonus.value
+		else
+			cost = cost + math.min(options.dangerMax.value, job.danger * options.dangerPerEnemy.value)
+		end
+	end
+
 	if job.econ then
 		cost = cost - options.splitWeight.value * splitImbalance
 	elseif job.factoryAssist then
@@ -1135,8 +1211,105 @@ local function UpdateWorkers(share)
 	SteerPriority()
 end
 
+--------------------------------------------------------------------------------
+-- Auto-built caretakers
+--------------------------------------------------------------------------------
+-- While metal is high, queue a caretaker beside each (producing) factory that
+-- has fewer than maxCaretakersPerFactory built or queued within caretaker
+-- range, one at a time per factory. Placed on a ring around the factory,
+-- within caretaker build range, and not on its exit side.
+
+local caretakerDefID = UnitDefNames.staticcon and UnitDefNames.staticcon.id
+local CARETAKER_CHECK_SECONDS = 5
+local caretakerTimer = 0
+
+-- Facing -> the direction units leave the factory in.
+local FACING_DIR = {
+	[0] = {0, 1},  -- south
+	[1] = {1, 0},  -- east
+	[2] = {0, -1}, -- north
+	[3] = {-1, 0}, -- west
+}
+
+-- Our own caretaker jobs (not yet built) near a spot, and whether any is.
+local function OwnCaretakerJobsNear(share, x, z, radius)
+	local me = spGetMyPlayerID()
+	local jobIds = share.GetJobIds(me)
+	local count = 0
+	local rSq = radius * radius
+	for i = 1, #jobIds do
+		local jobId = jobIds[i]
+		if share.GetCmdId(me, jobId) == -caretakerDefID and not share.GetUnitID(me, jobId)
+				and DistanceSq(x, z, share.GetX(me, jobId), share.GetZ(me, jobId)) <= rSq then
+			count = count + 1
+		end
+	end
+	return count
+end
+
+local function CaretakersNear(x, z, radius)
+	local units = spGetUnitsInCylinder(x, z, radius, managedTeamID)
+	local count = 0
+	if units then
+		for i = 1, #units do
+			if spGetUnitDefID(units[i]) == caretakerDefID then
+				count = count + 1
+			end
+		end
+	end
+	return count
+end
+
+-- A free spot for a caretaker beside a factory, or nil.
+local function CaretakerSpot(factoryID, share)
+	local fx, fy, fz = spGetUnitPosition(factoryID)
+	local ud = UnitDefs[spGetUnitDefID(factoryID)]
+	if not (fx and ud) then
+		return nil
+	end
+	local exit = FACING_DIR[spGetUnitBuildFacing(factoryID) or 0] or FACING_DIR[0]
+	local halfSize = math.max(ud.xsize or 0, ud.zsize or 0) * 4
+	local maxRadius = UnitDefs[caretakerDefID].buildDistance * 0.6
+	for radius = halfSize + 48, math.max(halfSize + 48, maxRadius), 32 do
+		for step = 0, 11 do
+			local angle = step * math.pi / 6
+			local dx, dz = math.sin(angle), math.cos(angle)
+			-- Keep clear of the exit side (within 60 degrees of it).
+			if dx * exit[1] + dz * exit[2] < 0.5 then
+				local x, y, z = spPos2BuildPos(caretakerDefID, fx + dx * radius, fy, fz + dz * radius)
+				if x and spTestBuildOrder(caretakerDefID, x, y, z, 0) == 2
+						and OwnCaretakerJobsNear(share, x, z, 64) == 0 then
+					return x, y, z
+				end
+			end
+		end
+	end
+	return nil
+end
+
+local function QueueCaretakers(share)
+	if not (caretakerDefID and options.autoCaretakers.value and metalHigh > 0) then
+		return
+	end
+	local range = UnitDefs[caretakerDefID].buildDistance
+	for factoryID in pairs(factories) do
+		if options.autoCaretakersIdleFactories.value or spGetUnitIsBuilding(factoryID) then
+			local fx, _, fz = spGetUnitPosition(factoryID)
+			-- One at a time per factory: skip while one is still queued.
+			if fx and OwnCaretakerJobsNear(share, fx, fz, range) == 0
+					and CaretakersNear(fx, fz, range) < options.maxCaretakersPerFactory.value then
+				local x, y, z = CaretakerSpot(factoryID, share)
+				if x then
+					share.Update({id = -caretakerDefID, x = x, y = y, z = z, h = 0})
+				end
+			end
+		end
+	end
+end
+
 local updateTimer = 0
 function widget:Update(dt)
+	caretakerTimer = caretakerTimer + dt
 	updateTimer = updateTimer + dt
 	if updateTimer < options.updateRate.value then
 		return
@@ -1150,6 +1323,10 @@ function widget:Update(dt)
 	CleanOwnJobs(share)
 	if managedTeamID and options.workerAI.value then
 		UpdateWorkers(share)
+		if caretakerTimer >= CARETAKER_CHECK_SECONDS then
+			caretakerTimer = 0
+			QueueCaretakers(share)
+		end
 	end
 end
 
