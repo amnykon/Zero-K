@@ -31,6 +31,7 @@
 --
 --  Orders are taken in CommandNotify, so only orders that go through the
 --  engine's normal command path are seen - plus mex and area mex placement,
+--  energy grid placement (cmd_energy_grid.lua, through QueueBuild/QueueRepair),
 --  and terraform (lasso terraform, building on raised or lowered ground),
 --  which those widgets offer to WG.GlobalBuildCommand first. Terraform
 --  becomes repair jobs on the terraform gadget's "terraunits".
@@ -1905,6 +1906,40 @@ function externalFunctions.GetJobCount()
 		return 0
 	end
 	return #share.GetJobIds(spGetMyTeamID())
+end
+
+-- For widgets that plan several builds at once (eg. cmd_energy_grid.lua) and
+-- hand them to GBC while GBC mode is on. Each returns true if the job was
+-- queued, false if GBC mode is off (the caller then orders units itself).
+-- elevation (optional): absolute height to level the footprint to first.
+function externalFunctions.QueueBuild(cmdID, x, y, z, facing, elevation)
+	if not (active and WG.GlobalBuildQueueShare) then
+		return false
+	end
+	QueueJob({id = cmdID, x = x, y = y or spGetGroundHeight(x, z), z = z, h = facing or 0, elevation = elevation})
+	return true
+end
+
+-- Help finish (repair) a unit, eg. an allied nanoframe.
+function externalFunctions.QueueRepair(targetID)
+	if not (active and WG.GlobalBuildQueueShare) then
+		return false
+	end
+	local x, y, z = spGetUnitPosition(targetID)
+	if not x then
+		return false
+	end
+	QueueJob({id = CMD_REPAIR, target = targetID, x = x, y = y, z = z})
+	return true
+end
+
+-- The GBC workers, as an array of unitIDs.
+function externalFunctions.GetWorkers()
+	local list = {}
+	for unitID in pairs(workers) do
+		list[#list + 1] = unitID
+	end
+	return list
 end
 
 -- The interface other widgets already use to talk to Global Build Command:

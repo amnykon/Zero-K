@@ -129,6 +129,31 @@ local queuedByOthers = {}
 local NEVER_BLOCKED = function() return false end
 local SpotBlocked = NEVER_BLOCKED
 
+-- Global Build Command (unit_global_build_command.lua): while its GBC mode is on,
+-- the grid is queued as GBC jobs for the GBC workers instead of being ordered to
+-- the selected constructors.
+local function GBCActive()
+	local gbc = WG.GlobalBuildCommandV2
+	return (not pregame) and gbc and gbc.IsActive() and WG.GlobalBuildQueueShare and true or false
+end
+
+-- The reach test for the builders the grid is for: the GBC workers in GBC mode
+-- (with none, every spot is kept - an ally's workers may take the jobs), otherwise
+-- the selection.
+local function GetSpotBlockedTest()
+	if not WG.SpotReach then
+		return NEVER_BLOCKED
+	end
+	if GBCActive() then
+		local workers = WG.GlobalBuildCommandV2.GetWorkers()
+		if #workers == 0 then
+			return NEVER_BLOCKED
+		end
+		return WG.SpotReach.GetBlockedTest(workers)
+	end
+	return WG.SpotReach.GetBlockedTest()
+end
+
 ------------------------------------------------------------
 -- Config
 ------------------------------------------------------------
@@ -745,6 +770,34 @@ local function orderPylonsToBuild()
 			local y = Spring.GetGroundHeight(x, z)
 			WG.InitialQueueHandleCommand(-defID, {x, y, z, Spring.GetBuildFacing()}, cmdOpts)
 			issued = issued + 1
+		end
+		return
+	end
+
+	-- GBC mode: queue the plan as GBC jobs (whatever is selected) and let the GBC
+	-- worker AI hand them out. GBC levels a spot that needs it itself, given the
+	-- height (elevation), and helps finish ally nanoframes as repair jobs.
+	if GBCActive() then
+		local gbc = WG.GlobalBuildCommandV2
+		local facing = Spring.GetBuildFacing()
+		for index = 1, extraBuildCount do
+			if not SpotBlocked(extraBuildSiteX[index], extraBuildSiteZ[index]) then
+				local x, z = extraBuildX[index], extraBuildZ[index]
+				gbc.QueueBuild(-extraBuildDefID[index], x, spGetGroundHeight(x, z), z, facing)
+			end
+		end
+		local ordered = orderBuildItemsByPath(cmdCenterX, cmdCenterZ)
+		for k = 1, #ordered do
+			local index = ordered[k]
+			local x = pylonsToBuildX[index]
+			local z = pylonsToBuildZ[index]
+			local repairID = pylonsToBuildRepair[index]
+			if repairID then
+				gbc.QueueRepair(repairID)
+			else
+				local terraH = options.autoTerraform.value and pylonsToBuildTerraform[index] or nil
+				gbc.QueueBuild(-pylonsToBuildDefID[index], x, terraH or spGetGroundHeight(x, z), z, facing, terraH)
+			end
 		end
 		return
 	end
@@ -1413,12 +1466,35 @@ local function gatherQueuedBuildings()
 	-- The command is issued to the current selection; buildings those units already
 	-- have queued are skip-anchors (don't duplicate on the same con), while buildings
 	-- queued by other ally cons are ones this selection should co-build.
+	-- In GBC mode no orders go to the selection, so every con's queued buildings,
+	-- and every allied GBC build job, are already taken care of: all are skip-anchors.
+	local gbc = GBCActive()
+	if gbc then
+		local share = WG.GlobalBuildQueueShare
+		local teams = Spring.GetTeamList(spGetMyAllyTeamID())
+		for t = 1, #teams do
+			local teamID = teams[t]
+			local jobIds = share.GetJobIds(teamID)
+			for j = 1, #jobIds do
+				local jobCmd = share.GetCmdId(teamID, jobIds[j])
+				local range = jobCmd and jobCmd < 0 and pylonRange[-jobCmd]
+				if range then
+					queuedBuildings[#queuedBuildings + 1] = {
+						defID = -jobCmd, x = share.GetX(teamID, jobIds[j]), z = share.GetZ(teamID, jobIds[j]), range = range,
+					}
+				end
+			end
+		end
+	end
+
 	local _, _, meta, shift = spGetModKeyState()
-	local keepQueue = shift or meta
+	local keepQueue = shift or meta or gbc
 	local selected = {}
-	local sel = Spring.GetSelectedUnits()
-	for i = 1, #sel do
-		selected[sel[i]] = true
+	if not gbc then
+		local sel = Spring.GetSelectedUnits()
+		for i = 1, #sel do
+			selected[sel[i]] = true
+		end
 	end
 
 	local myAllyTeam = spGetMyAllyTeamID()
@@ -1430,7 +1506,7 @@ local function gatherQueuedBuildings()
 			if ud and ud.isMobileBuilder then
 				local cmds = (keepQueue or not selected[unitID]) and spGetCommandQueue(unitID, -1)
 				if cmds then
-					local list = selected[unitID] and queuedBuildings or queuedByOthers
+					local list = (gbc or selected[unitID]) and queuedBuildings or queuedByOthers
 					for c = 1, #cmds do
 						local cmd = cmds[c]
 						local id = cmd.id
@@ -1504,7 +1580,7 @@ local function updatePylonsToBuild()
 	end
 
 	gatherQueuedBuildings()
-	SpotBlocked = WG.SpotReach and WG.SpotReach.GetBlockedTest() or NEVER_BLOCKED
+	SpotBlocked = GetSpotBlockedTest()
 
 	-- No drag: place a single pylon at the clicked spot (terraform if needed), unless
 	-- that spot is already on a build queue.
