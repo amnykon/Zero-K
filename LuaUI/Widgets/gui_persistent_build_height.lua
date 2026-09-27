@@ -204,6 +204,21 @@ local function SendCommand()
 
 	pointY = math.max(pointY, -UnitDefs[buildingPlacementID].maxWaterDepth)
 	
+	-- Global Build Command (in its GBC mode) takes the whole order - this
+	-- building at this height - as one job, and works out the terraform itself
+	-- when a worker gets to it, so no terraform is ordered here.
+	if WG.GlobalBuildCommand and WG.GlobalBuildCommand.CommandNotifyBuildAtHeight
+			and WG.GlobalBuildCommand.CommandNotifyBuildAtHeight(-buildingPlacementID, pointX, pointY, pointZ, facing) then
+		local _, _, _, shift = spGetModKeyState()
+		if not shift then
+			spSetActiveCommand(nil)
+		end
+		if WG.OtherWidgetPlacedMex then
+			WG.OtherWidgetPlacedMex()
+		end
+		return
+	end
+	
 	-- Setup parameters for terraform command
 	local team = Spring.GetUnitTeam(constructor[1]) or Spring.GetMyTeamID()
 	local commandTag = WG.Terraform_GetNextTag()
