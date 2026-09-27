@@ -130,10 +130,11 @@ local res_color = {0.4, 0.8, 1.0, 1.0}
 -- "GBCQ|<data>" - a delta. <data> is zero or more ';'-terminated records,
 -- applied on top of whatever the receiver already has, each of one of three
 -- forms:
---   U,<jobId>,<cmdId>,<x>,<y>,<z>,<h>,<r>,<target>,<reach>,<priority>,<unitID> -- add/update a job
+--   U,<jobId>,<cmdId>,<x>,<y>,<z>,<h>,<r>,<target>,<reach>,<priority>,<unitID>,<elevation>,<wall> -- add/update a job
 --   R,<jobId>                                                                 -- remove a job
 --   A,<ownerPlayerID>,<jobId>,<workers>                                        -- report an assist count
--- Empty optional fields (h, r, target, reach, priority, unitID) are encoded as "".
+-- Empty optional fields (h, r, target, reach, priority, unitID, elevation,
+-- wall) are encoded as "".
 --   jobId    : a hash derived from the job's own identity-defining fields
 --              (see BuildJobHash below), computed by the owner's own widget -
 --              never the caller. Unique among that one player's jobs only,
@@ -166,6 +167,13 @@ local res_color = {0.4, 0.8, 1.0, 1.0}
 --              a unit (eg. from a UnitFinished/UnitDestroyed callin), find
 --              which job (any player's) it belongs to, without needing to
 --              already know its owner or jobId.
+--   elevation: build jobs only - the absolute height to build the building
+--              at: above the ground is a spire, below it a hole (eg. a
+--              buried mex). The terraform to get there is worked out by
+--              whoever carries the job out, not stored.
+--   wall     : build jobs only - the height of a wall around the building,
+--              above its base (eg. area mex's walls). Also worked out by
+--              whoever carries the job out.
 --
 -- A job's worker count isn't part of the job record itself - it's the sum of
 -- however many workers each interested player (the owner included) reports
@@ -240,6 +248,8 @@ local jobTarget = {}
 local jobReach = {} -- reach enum for the job's spot, or nil for unrestricted (see the network protocol comment above)
 local jobPriority = {} -- 0=low, 1=high, or nil for medium/normal (see the network protocol comment above)
 local jobUnitID = {} -- the job's actual in-world unit, or nil if none exists yet
+local jobElevation = {} -- absolute height to build a building at, or nil (see the network protocol comment above)
+local jobWall = {} -- height of a wall around a building, or nil (see the network protocol comment above)
 local jobOwner = {} -- jobOwner[key] = the owning playerID
 
 -- Reverse index of jobUnitID, for any player's job: unitIDToOwnerKey[unitID]
@@ -281,7 +291,7 @@ local pendingAssist = {}
 --------------------------------------------------------------------------------
 -- Encoding / Decoding ---------------------------------------------------------
 
-local function EncodeUpsert(jobId, cmdId, x, y, z, h, r, target, reach, priority, unitID)
+local function EncodeUpsert(jobId, cmdId, x, y, z, h, r, target, reach, priority, unitID, elevation, wall)
 	return "U," .. jobId .. ","
 		.. (cmdId or 0) .. ","
 		.. floor(x or 0) .. ","
@@ -292,7 +302,9 @@ local function EncodeUpsert(jobId, cmdId, x, y, z, h, r, target, reach, priority
 		.. (target and floor(target) or "") .. ","
 		.. (reach and floor(reach) or "") .. ","
 		.. (priority and floor(priority) or "") .. ","
-		.. (unitID and floor(unitID) or "")
+		.. (unitID and floor(unitID) or "") .. ","
+		.. (elevation and floor(elevation) or "") .. ","
+		.. (wall and floor(wall) or "")
 		.. ";"
 end
 
@@ -314,8 +326,8 @@ end
 -- Returns the decoded scalar fields for a "U" record's rest (deliberately
 -- not packed into a job table, to avoid allocating one per record decoded).
 local function DecodeUpsert(rest)
-	local jobId, cmdId, x, y, z, h, r, target, reach, priority, unitID =
-		rest:match("^([^,]+),(-?%d+),(-?%d+),(-?%d+),(-?%d+),(%d*),(%d*),(%d*),(%d*),(%d*),(%d*)$")
+	local jobId, cmdId, x, y, z, h, r, target, reach, priority, unitID, elevation, wall =
+		rest:match("^([^,]+),(-?%d+),(-?%d+),(-?%d+),(-?%d+),(%d*),(%d*),(%d*),(%d*),(%d*),(%d*),(-?%d*),(%d*)$")
 	if not jobId then
 		return nil
 	end
@@ -325,7 +337,9 @@ local function DecodeUpsert(rest)
 		(target ~= "") and tonumber(target) or nil,
 		(reach ~= "") and tonumber(reach) or nil,
 		(priority ~= "") and tonumber(priority) or nil,
-		(unitID ~= "") and tonumber(unitID) or nil
+		(unitID ~= "") and tonumber(unitID) or nil,
+		(elevation ~= "") and tonumber(elevation) or nil,
+		(wall ~= "") and tonumber(wall) or nil
 end
 
 local function DecodeAssist(rest)
@@ -353,7 +367,8 @@ end
 local function EncodeLocalUpsert(jobId)
 	local key = myPlayerID .. "#" .. jobId
 	return EncodeUpsert(jobId, cmdId[key], jobX[key], jobY[key], jobZ[key],
-		jobH[key], jobR[key], jobTarget[key], jobReach[key], jobPriority[key], jobUnitID[key])
+		jobH[key], jobR[key], jobTarget[key], jobReach[key], jobPriority[key], jobUnitID[key],
+		jobElevation[key], jobWall[key])
 end
 
 -- Reads back our own current assist contribution to ownerKey, deriving the
@@ -436,7 +451,8 @@ local function SendRestore(requesterID, nonce)
 		if owner == requesterID then
 			local jobId = key:sub(#prefix + 1)
 			records[#records+1] = EncodeUpsert(jobId, cmdId[key], jobX[key], jobY[key], jobZ[key],
-				jobH[key], jobR[key], jobTarget[key], jobReach[key], jobPriority[key], jobUnitID[key])
+				jobH[key], jobR[key], jobTarget[key], jobReach[key], jobPriority[key], jobUnitID[key],
+		jobElevation[key], jobWall[key])
 			if #records > MAX_UPDATES_PER_SEND then
 				SendBatch(records)
 				records = {header}
@@ -503,6 +519,8 @@ local function ClearJob(key)
 	jobTarget[key] = nil
 	jobReach[key] = nil
 	jobPriority[key] = nil
+	jobElevation[key] = nil
+	jobWall[key] = nil
 	SetJobUnitID(key, nil)
 	jobOwner[key] = nil
 	jobWorkersTotal[key] = nil
@@ -555,7 +573,7 @@ local function ApplyRecordsData(playerID, data)
 			restoring = true
 			ownerID = myPlayerID
 		elseif op == "U" then
-			local jobId, decodedCmdId, x, y, z, h, r, target, reach, priority, unitID = DecodeUpsert(rest)
+			local jobId, decodedCmdId, x, y, z, h, r, target, reach, priority, unitID, elevation, wall = DecodeUpsert(rest)
 			-- A restore never overwrites a job we already have again locally.
 			if jobId and not (restoring and jobOwner[ownerID .. "#" .. jobId]) then
 				local key = ownerID .. "#" .. jobId
@@ -568,6 +586,8 @@ local function ApplyRecordsData(playerID, data)
 				jobTarget[key] = target
 				jobReach[key] = reach
 				jobPriority[key] = priority
+				jobElevation[key] = elevation
+				jobWall[key] = wall
 				SetJobUnitID(key, unitID)
 				jobOwner[key] = ownerID
 			end
@@ -848,7 +868,7 @@ end
 -- To be called (from unit_global_build_command.lua or similar)
 -- whenever it adds a job or changes one it already has. `job` must have the
 -- fields documented in the network protocol comment above (id, x, y, z, and
--- the optional h/r/target/reach/priority/unitID). Returns the jobId (see
+-- the optional h/r/target/reach/priority/unitID/elevation/wall). Returns the jobId (see
 -- BuildJobHash above) - useful for a caller that wants to Delete()/Assist()
 -- this exact job later without recomputing the hash itself, though it never
 -- has to: calling Update() again with the same identity-defining fields
@@ -871,6 +891,8 @@ local function UpdateJob(job)
 	jobTarget[key] = job.target
 	jobReach[key] = job.reach
 	jobPriority[key] = job.priority
+	jobElevation[key] = job.elevation
+	jobWall[key] = job.wall
 	SetJobUnitID(key, job.unitID)
 	jobOwner[key] = myPlayerID
 	pendingStatus[jobId] = true
@@ -947,6 +969,15 @@ local function GetPriority(ownerPlayerID, jobId)
 	return jobPriority[ownerPlayerID .. "#" .. jobId]
 end
 
+-- Returns a build job's elevation (absolute height to build the building at)
+-- and wall height, each nil if it has none - see the network protocol comment.
+local function GetElevation(ownerPlayerID, jobId)
+	return jobElevation[ownerPlayerID .. "#" .. jobId]
+end
+local function GetWall(ownerPlayerID, jobId)
+	return jobWall[ownerPlayerID .. "#" .. jobId]
+end
+
 -- Returns the job's actual in-world unit, or nil if none exists yet (or the
 -- job doesn't exist) - eg. to check build progress directly instead of only
 -- knowing the job's world position.
@@ -1011,6 +1042,8 @@ function widget:Initialize()
 		GetReach = GetReach,
 		GetPriority = GetPriority,
 		GetUnitID = GetUnitID,
+		GetElevation = GetElevation,
+		GetWall = GetWall,
 		GetJobByUnitID = GetJobByUnitID,
 		GetJobIds = GetJobIds,
 	}

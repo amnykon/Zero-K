@@ -187,6 +187,134 @@ local function TerraformRadius(unitDef)
 	return math.max(unitDef.xsize or 0, unitDef.zsize or 0) * 8 + 32
 end
 
+local function IsNanoframe(unitID)
+	local _, _, beingBuilt = spGetUnitIsStunned(unitID)
+	return beingBuilt
+end
+
+--------------------------------------------------------------------------------
+-- Buildings at a height, and walls
+--------------------------------------------------------------------------------
+-- A build job can say to build the building at an elevation (an absolute
+-- height: a spire, or a hole such as a buried mex) and/or with a wall around
+-- it (a height above its base). The job only says what's wanted; the
+-- terraform is worked out here, when a worker gets to it:
+--   - elevation: level the building's footprint to that height, before
+--     building (as persistent build height does).
+--   - wall: once the building stands, raise-only the square twice its
+--     footprint to base + wall height (as area mex does); the terraform
+--     gadget leaves the ground under a building alone, so that makes a ring.
+-- Whether terraform is still needed is read from the ground each time, so
+-- nothing needs remembering: a wall around an existing building works, and it
+-- survives a reload. Terraform is started through the terraform gadget like
+-- the terraform widgets do (CMD_TERRAFORM_INTERNAL, then CMD_LEVEL with the
+-- same tag, which sends the worker to repair that terraform's terraunits).
+
+local TERRAFORM_TOLERANCE = 4
+-- After starting a job's terraform, how long to wait for its terraunits to
+-- appear before starting it again.
+local TERRAFORM_ISSUE_WAIT = 90
+-- terraformIssued[key] = {tag, frame}: terraform we started for a job, so our
+-- other workers can join it by tag.
+local terraformIssued = {}
+local ownTerraformTag = 1000000
+
+local function NextTerraformTag()
+	if WG.Terraform_GetNextTag then
+		return WG.Terraform_GetNextTag()
+	end
+	ownTerraformTag = ownTerraformTag + 1
+	return ownTerraformTag
+end
+
+-- Half-size of a building's footprint, as persistent build height uses.
+local function FootprintHalf(unitDef, facing)
+	local hx, hz = (unitDef.xsize or 0) * 4, (unitDef.zsize or 0) * 4
+	if facing == 1 or facing == 3 then
+		hx, hz = hz, hx
+	end
+	return hx - 0.1, hz - 0.1
+end
+
+-- The finished building of this type standing at a spot, if any (ours or an
+-- ally's).
+local function ExistingBuildingAt(unitDefID, x, z)
+	local units = spGetUnitsInCylinder(x, z, 24)
+	if units then
+		for i = 1, #units do
+			local unitID = units[i]
+			if spGetUnitDefID(unitID) == unitDefID and spIsUnitAllied(unitID) and not IsNanoframe(unitID) then
+				return unitID
+			end
+		end
+	end
+	return nil
+end
+
+local function ElevationNeeded(x, z, elevation)
+	return math.abs(spGetGroundHeight(x, z) - elevation) > TERRAFORM_TOLERANCE
+end
+
+-- The height a wall should reach, from the building's base.
+local function WallTop(x, z, wall)
+	return math.max(math.max(spGetGroundHeight(x, z), 0) + wall, 0)
+end
+
+local function WallNeeded(unitDef, x, z, facing, wall)
+	local fx, fz = FootprintHalf(unitDef, facing)
+	local top = WallTop(x, z, wall)
+	-- Sample halfway between the building's edge and the wall's edge.
+	local dx, dz = fx * 1.5, fz * 1.5
+	return spGetGroundHeight(x + dx, z) < top - TERRAFORM_TOLERANCE
+		or spGetGroundHeight(x - dx, z) < top - TERRAFORM_TOLERANCE
+		or spGetGroundHeight(x, z + dz) < top - TERRAFORM_TOLERANCE
+		or spGetGroundHeight(x, z - dz) < top - TERRAFORM_TOLERANCE
+end
+
+-- The allied terraunit nearest a spot, within radius, if any.
+local function NearestTerraunit(x, z, radius)
+	local best, bestSq
+	local rSq = radius * radius
+	for unitID, pos in pairs(alliedTerraunits) do
+		local dSq = DistanceSq(x, z, pos[1], pos[2])
+		if dSq <= rSq and (not bestSq or dSq < bestSq) then
+			best, bestSq = unitID, dSq
+		end
+	end
+	return best
+end
+
+-- Starts a build job's terraform (job.phase "elevate" or "wall") with this
+-- worker, and sends the worker to it.
+local function StartTerraform(unitID, job, frame)
+	local unitDef = UnitDefs[-job.cmd]
+	local fx, fz = FootprintHalf(unitDef, job.h)
+	local hx, hz, height, volume
+	if job.phase == "elevate" then
+		hx, hz, height, volume = fx, fz, job.elevation, 0 -- raise or lower
+	else
+		hx, hz, height, volume = fx * 2, fz * 2, WallTop(job.x, job.z, job.wall), 1 -- raise only
+	end
+	local tag = NextTerraformTag()
+	local x, z = job.x, job.z
+	local params = {
+		1,                -- terraform type: level
+		spGetUnitTeam(unitID),
+		x, z,
+		tag,
+		1,                -- loop
+		height,
+		5,                -- points
+		1,                -- constructors
+		volume,
+		x + hx, z + hz, x + hx, z - hz, x - hx, z - hz, x - hx, z + hz, x + hx, z + hz,
+		unitID,
+	}
+	spGiveOrderToUnit(unitID, CMD_TERRAFORM_INTERNAL, params, 0)
+	spGiveOrderToUnit(unitID, CMD_LEVEL, {x, spGetGroundHeight(x, z), z, tag}, 0)
+	terraformIssued[job.key] = {tag, frame}
+end
+
 --------------------------------------------------------------------------------
 -- Helpers
 --------------------------------------------------------------------------------
@@ -620,10 +748,6 @@ local FAILED_RETRY_FRAMES = 30 * 30
 -- How close (elmos) a new unit has to be to a build job's spot to be its unit.
 local LINK_DISTANCE = 24
 
-local function IsNanoframe(unitID)
-	local _, _, beingBuilt = spGetUnitIsStunned(unitID)
-	return beingBuilt
-end
 
 local function SplitKey(key)
 	local owner, jobId = key:match("^(%d+)#(.+)$")
@@ -674,6 +798,8 @@ local function SetOwnJobUnitID(share, jobId, unitID)
 		reach = share.GetReach(me, jobId),
 		priority = share.GetPriority(me, jobId),
 		unitID = unitID,
+		elevation = share.GetElevation(me, jobId),
+		wall = share.GetWall(me, jobId),
 	})
 end
 
@@ -715,10 +841,25 @@ local function CleanOwnJobs(share)
 		local target = share.GetTarget(me, jobId)
 		local done = false
 		if cmd < 0 then
-			if not share.GetUnitID(me, jobId) then
-				local x, z = share.GetX(me, jobId), share.GetZ(me, jobId)
-				done = spTestBuildOrder(-cmd, x, share.GetY(me, jobId), z, share.GetH(me, jobId) or 0) == 0
-					and not TerraformPendingAt(x, z, TerraformRadius(UnitDefs[-cmd]))
+			local x, z = share.GetX(me, jobId), share.GetZ(me, jobId)
+			local facing = share.GetH(me, jobId) or 0
+			local wall = share.GetWall(me, jobId)
+			local unitID = share.GetUnitID(me, jobId)
+			if unitID then
+				-- Built, and a wall still to raise: keep it until the wall is up.
+				if wall and spValidUnitID(unitID) and not IsNanoframe(unitID) then
+					done = not WallNeeded(UnitDefs[-cmd], x, z, facing, wall)
+				end
+			elseif spTestBuildOrder(-cmd, x, share.GetY(me, jobId), z, facing) == 0 then
+				-- Blocked: by the building itself (built by someone else, or
+				-- already there when a wall was ordered around it), by
+				-- terraform still going on, or by something else.
+				local existing = ExistingBuildingAt(-cmd, x, z)
+				if existing and wall then
+					SetOwnJobUnitID(share, jobId, existing) -- on to its wall
+				else
+					done = not TerraformPendingAt(x, z, TerraformRadius(UnitDefs[-cmd]))
+				end
 			end
 		elseif target then
 			if target >= Game.maxUnits then
@@ -875,10 +1016,35 @@ local function CollectJobs(share, avgBuildPower, frame)
 						valid = false
 					end
 				end
-				-- A build job waiting on terraform can't be built yet.
-				if valid and cmd and cmd < 0 and x and not share.GetUnitID(owner, jobId)
-						and TerraformPendingAt(x, z, TerraformRadius(UnitDefs[-cmd])) then
-					valid = false
+				-- Build jobs: which phase they're in (see Buildings at a height,
+				-- and walls). One waiting on terraform it didn't order itself
+				-- (lasso's "level, then build") can't be built yet.
+				local phase, elevation, wall, terraunit
+				if valid and cmd and cmd < 0 and x then
+					local unitDef = UnitDefs[-cmd]
+					local facing = share.GetH(owner, jobId) or 0
+					local jobUnitID = share.GetUnitID(owner, jobId)
+					local radius = TerraformRadius(unitDef)
+					elevation, wall = share.GetElevation(owner, jobId), share.GetWall(owner, jobId)
+					local built = jobUnitID and spValidUnitID(jobUnitID) and not IsNanoframe(jobUnitID)
+					if not jobUnitID and wall then
+						built = ExistingBuildingAt(-cmd, x, z) and true
+					end
+					if built then
+						phase = (wall and WallNeeded(unitDef, x, z, facing, wall)) and "wall" or nil
+						valid = phase ~= nil
+					elseif not jobUnitID and elevation and ElevationNeeded(x, z, elevation) then
+						phase = "elevate"
+					elseif not jobUnitID and not elevation and TerraformPendingAt(x, z, radius) then
+						valid = false
+					end
+					if phase then
+						terraunit = NearestTerraunit(x, z, radius * 2)
+						local issued = terraformIssued[owner .. "#" .. jobId]
+						if not terraunit and issued and frame < issued[2] + TERRAFORM_ISSUE_WAIT then
+							valid = false -- just started it; wait for its terraunits
+						end
+					end
 				end
 				if valid and cmd and x then
 					local key = owner .. "#" .. jobId
@@ -914,6 +1080,10 @@ local function CollectJobs(share, avgBuildPower, frame)
 						waitingBonus = math.min(options.waitingBonusMax.value, minutes * options.waitingBonusPerMinute.value)
 					end
 					jobs[#jobs+1] = {
+						phase = phase,
+						elevation = elevation,
+						wall = wall,
+						terraunit = terraunit,
 						waitingBonus = waitingBonus,
 						produces = produces,
 						econ = econ,
@@ -963,11 +1133,18 @@ end
 -- The command a worker needs for a job: a build job whose unit has started is
 -- helped with repair (which also works on an ally's unit).
 local function JobCommand(job)
+	if job.phase then
+		return job.terraunit and CMD_REPAIR or CMD_LEVEL
+	end
 	if job.cmd < 0 and job.unitID then
 		return CMD_REPAIR
 	end
 	return job.cmd
 end
+
+-- While terraforming for a job, the terraform gadget puts repair orders on
+-- its terraunits ahead of CMD_LEVEL, so either is the worker still on the job.
+local TERRAFORM_CMDS = {[CMD_LEVEL] = true, [CMD_REPAIR] = true}
 
 -- How full the managed team's storage of a resource is, 0 to 1, leaving
 -- out the hidden storage. nil if there's no storage to speak of.
@@ -1190,6 +1367,23 @@ local function Assign(unitID, job, frame)
 	if oldKey then
 		SetOurCount(oldKey, (ourCount[oldKey] or 1) - 1)
 	end
+	if job.phase then
+		local issued = terraformIssued[job.key]
+		if issued and job.owner == spGetMyPlayerID() and job.terraunit then
+			-- Join our own terraform for it by tag.
+			spGiveOrderToUnit(unitID, CMD_LEVEL, {job.x, spGetGroundHeight(job.x, job.z), job.z, issued[1]}, 0)
+		elseif job.terraunit then
+			spGiveOrderToUnit(unitID, CMD_REPAIR, {job.terraunit}, 0)
+		else
+			StartTerraform(unitID, job, frame)
+		end
+		assignment[unitID] = job.key
+		assignedCmd[unitID] = TERRAFORM_CMDS
+		assignedFrame[unitID] = frame
+		assignedSide[unitID] = job.econ and "econ" or nil
+		SetOurCount(job.key, (ourCount[job.key] or 0) + 1)
+		return
+	end
 	local cmd = JobCommand(job)
 	local params
 	if cmd == CMD_REPAIR and job.cmd < 0 then
@@ -1223,12 +1417,20 @@ local function CheckWorker(unitID, share, frame)
 		return true -- our order may not have arrived yet
 	end
 	local cmd = spGetUnitCurrentCommand(unitID)
-	if cmd == assignedCmd[unitID] then
+	local expected = assignedCmd[unitID]
+	if cmd == expected or (type(expected) == "table" and expected[cmd]) then
 		return true
 	end
 	if cmd then
 		Unassign(unitID) -- given other orders
 		return false
+	end
+
+	-- Idle after terraforming for a job: that part's done (or those
+	-- terraunits are); the job goes on to its next part.
+	if expected == TERRAFORM_CMDS then
+		Unassign(unitID)
+		return true
 	end
 
 	-- Went idle on the job. If the job is still there, the worker couldn't do
@@ -1237,6 +1439,13 @@ local function CheckWorker(unitID, share, frame)
 	-- it goes idle (others may still be finishing their part of the area).
 	local owner, jobId = SplitKey(key)
 	local jobCmd = owner and share.GetCmdId(owner, jobId)
+	-- Idle once its building is finished, with the job still there: the job
+	-- is on to its wall, so the building part is done, not failed.
+	local jobUnit = jobCmd and jobCmd < 0 and share.GetUnitID(owner, jobId)
+	if jobUnit and spValidUnitID(jobUnit) and not IsNanoframe(jobUnit) then
+		Unassign(unitID)
+		return true
+	end
 	if jobCmd then
 		local isOwnAreaJob = owner == spGetMyPlayerID() and jobCmd >= 0 and not share.GetTarget(owner, jobId)
 		if isOwnAreaJob and (ourCount[key] or 0) <= 1 then
@@ -1288,7 +1497,13 @@ local function UpdateWorkers(share)
 				local best, bestCost, currentCost
 				for j = 1, #jobs do
 					local job = jobs[j]
+					-- A job whose terraform a worker has just started (this
+					-- update, or recently) waits for its terraunits before
+					-- anyone else joins, so it isn't started twice.
+					local issued = job.phase and not job.terraunit and job.key ~= currentKey and terraformIssued[job.key]
+					local justStarted = issued and frame < issued[2] + TERRAFORM_ISSUE_WAIT
 					if not (failed and failed[job.key] and failed[job.key] > frame)
+							and not justStarted
 							and spFindUnitCmdDesc(unitID, JobCommand(job)) then
 						local cost = JobCost(wx, wz, speed, ud.buildDistance, job, currentKey, travelFactor)
 						if job.key == currentKey then
@@ -1696,11 +1911,25 @@ end
 -- and gui_selection_hierarchy ask whether it controls a unit.
 local compatibility = {
 	-- Mex (and area mex) placement: queued as GBC jobs while GBC mode is on.
-	CommandNotifyMex = function(cmdID, params, cmdOpts, isAreaMex)
+	-- terra (optional, from area mex's terraform modes): {elevation = ...} to
+	-- bury the mex, or {wall = ...} to wall it.
+	CommandNotifyMex = function(cmdID, params, cmdOpts, isAreaMex, terra)
 		if not (active and WG.GlobalBuildQueueShare) then
 			return false
 		end
-		QueueJob({id = cmdID, x = params[1], y = params[2] or spGetGroundHeight(params[1], params[3]), z = params[3], h = params[4] or 0})
+		QueueJob({
+			id = cmdID, x = params[1], y = params[2] or spGetGroundHeight(params[1], params[3]), z = params[3], h = params[4] or 0,
+			elevation = terra and terra.elevation, wall = terra and terra.wall,
+		})
+		return true
+	end,
+	-- A building at a height (persistent build height), offered before any
+	-- terraform is ordered: queued as one job with that elevation.
+	CommandNotifyBuildAtHeight = function(cmdID, x, y, z, facing)
+		if not (active and WG.GlobalBuildQueueShare) then
+			return false
+		end
+		QueueJob({id = cmdID, x = x, y = y, z = z, h = facing or 0, elevation = y})
 		return true
 	end,
 	-- Terraform (lasso terraform): while GBC mode is on, the terraform still
@@ -1714,9 +1943,10 @@ local compatibility = {
 		captureTerraformUntil = spGetGameFrame() + TERRAFORM_CAPTURE_FRAMES
 		return true
 	end,
-	-- Building on raised or lowered ground (persistent build height, lasso
-	-- terraform): the terraform is captured as above, and the building queued
-	-- as a job that waits until the terraform around it is done.
+	-- Lasso terraform's "level, then build": the drawn terraform is captured as
+	-- above, and the building queued as a job that waits until the terraform
+	-- around it is done. (Persistent build height uses
+	-- CommandNotifyBuildAtHeight instead.)
 	CommandNotifyRaiseAndBuild = function(unitArray, cmdID, x, y, z, facing, shift)
 		if not (active and WG.GlobalBuildQueueShare and terraunitDefID) then
 			return false
@@ -1778,7 +2008,11 @@ function widget:UnitFinished(unitID, unitDefID, unitTeam)
 	end
 	local owner, jobId = share.GetJobByUnitID(unitID)
 	if owner and owner == spGetMyPlayerID() then
-		share.Delete(jobId)
+		-- A wall still to raise around it keeps the job going.
+		local wall = share.GetWall(owner, jobId)
+		if not (wall and WallNeeded(UnitDefs[unitDefID], share.GetX(owner, jobId), share.GetZ(owner, jobId), share.GetH(owner, jobId) or 0, wall)) then
+			share.Delete(jobId)
+		end
 	end
 end
 
