@@ -62,6 +62,9 @@ local spGetUnitPosition   = Spring.GetUnitPosition
 local spGetFeaturePosition = Spring.GetFeaturePosition
 local spEcho              = Spring.Echo
 local spGetMyTeamID       = Spring.GetMyTeamID
+local spGetMyPlayerID     = Spring.GetMyPlayerID
+local spGetTeamInfo       = Spring.GetTeamInfo
+local spGetSpectatingState = Spring.GetSpectatingState
 local spGetTeamUnits      = Spring.GetTeamUnits
 local spGetUnitDefID      = Spring.GetUnitDefID
 local spGetSelectedUnits  = Spring.GetSelectedUnits
@@ -90,10 +93,17 @@ local myJobs = {}
 
 local dragX, dragZ, dragR -- in-progress right-drag for area removal
 
-local myTeamID = spGetMyTeamID()
+-- The team whose constructors this player's GBC manages, or nil for none.
+-- Only the team's leader manages it: with commshare, several players control
+-- one team, and the engine doesn't record which of them owns which unit, so
+-- the leader (the player whose team the others merged into) manages every
+-- constructor on it and the others manage none. Their GBC mode still queues
+-- jobs, which the leader's worker AI sees like any ally's. Spectators never
+-- lead the team they're watching, so they manage nothing either.
+local managedTeamID = nil
 
--- GBC workers: workers[unitID] = true for every mobile builder on our team
--- with the Global Build state on. A builder with it off simply isn't here.
+-- GBC workers: workers[unitID] = true for every mobile builder on the
+-- managed team with the Global Build state on. A builder with it off simply isn't here.
 -- New builders start on, and join as soon as they're created, so a nanoframe
 -- switched off before it finishes stays off. Unfinished builders are in the
 -- set too - the worker AI skips units it can't order yet. This is only "does
@@ -153,7 +163,7 @@ end
 -- For the state button: selected units can include ones on other teams (eg.
 -- while spectating), which GBC doesn't control.
 local function IsOurBuilder(unitID)
-	return spGetUnitTeam(unitID) == myTeamID and IsMobileBuilder(spGetUnitDefID(unitID))
+	return managedTeamID and spGetUnitTeam(unitID) == managedTeamID and IsMobileBuilder(spGetUnitDefID(unitID))
 end
 
 local function AddBuilder(unitID, unitDefID)
@@ -162,11 +172,33 @@ local function AddBuilder(unitID, unitDefID)
 	end
 end
 
--- Rebuilds membership from scratch for our current team, eg. on startup or
--- after our team changes.
-local function ScanTeam()
+local function GetManagedTeamID()
+	if spGetSpectatingState() then
+		return nil
+	end
+	local teamID = spGetMyTeamID()
+	local _, leaderID = spGetTeamInfo(teamID, false)
+	if leaderID ~= spGetMyPlayerID() then
+		return nil
+	end
+	return teamID
+end
+
+-- Rebuilds membership from scratch when the managed team changes (startup,
+-- becoming or ceasing to be a team's leader, spectating). A merge into the
+-- team we already lead doesn't come through here: its units arrive through
+-- UnitGiven like any other transfer.
+local function UpdateManagedTeam(force)
+	local teamID = GetManagedTeamID()
+	if teamID == managedTeamID and not force then
+		return
+	end
+	managedTeamID = teamID
 	workers = {}
-	local units = spGetTeamUnits(myTeamID)
+	if not managedTeamID then
+		return
+	end
+	local units = spGetTeamUnits(managedTeamID)
 	if not units then
 		return
 	end
@@ -260,20 +292,15 @@ function widget:CommandNotify(cmdID, params, opts)
 end
 
 function widget:Initialize()
-	myTeamID = spGetMyTeamID()
-	ScanTeam()
+	UpdateManagedTeam(true)
 end
 
 function widget:PlayerChanged(playerID)
-	local teamID = spGetMyTeamID()
-	if teamID ~= myTeamID then
-		myTeamID = teamID
-		ScanTeam()
-	end
+	UpdateManagedTeam()
 end
 
 function widget:UnitCreated(unitID, unitDefID, unitTeam)
-	if unitTeam == myTeamID then
+	if managedTeamID and unitTeam == managedTeamID then
 		AddBuilder(unitID, unitDefID)
 	end
 end
@@ -283,13 +310,13 @@ function widget:UnitDestroyed(unitID, unitDefID, unitTeam)
 end
 
 function widget:UnitGiven(unitID, unitDefID, newTeam, oldTeam)
-	if newTeam == myTeamID then
+	if managedTeamID and newTeam == managedTeamID then
 		AddBuilder(unitID, unitDefID)
 	end
 end
 
 function widget:UnitTaken(unitID, unitDefID, oldTeam, newTeam)
-	if oldTeam == myTeamID and newTeam ~= myTeamID then
+	if oldTeam == managedTeamID and newTeam ~= managedTeamID then
 		workers[unitID] = nil
 	end
 end
