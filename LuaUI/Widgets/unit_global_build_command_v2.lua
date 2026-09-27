@@ -247,6 +247,108 @@ end
 -- Callins
 --------------------------------------------------------------------------------
 
+-- While GBC mode is on, offers every command our GBC workers could carry out
+-- - their build options and repair/reclaim/resurrect - whatever is selected,
+-- so jobs can be queued with no constructor selected. The command panel puts
+-- these in the build tabs and orders like the selection's own commands, and
+-- CommandNotify turns them into jobs before they reach any unit. Commands the
+-- selection already has are skipped, so a selected constructor doesn't give
+-- two copies of each.
+--
+-- UNTESTED: relies on the engine doing building placement (preview, facing,
+-- grid snapping, line/area placement) for a widget-added build command that
+-- no selected unit can build.
+local workerCommands = {
+	{
+		flag    = "canRepair",
+		id      = CMD_REPAIR,
+		type    = CMDTYPE.ICON_UNIT_OR_AREA,
+		name    = 'Repair',
+		action  = 'repair',
+		cursor  = 'Repair',
+		tooltip = 'Queue a GBC repair job.',
+	},
+	{
+		flag    = "canReclaim",
+		id      = CMD_RECLAIM,
+		type    = CMDTYPE.ICON_UNIT_FEATURE_OR_AREA,
+		name    = 'Reclaim',
+		action  = 'reclaim',
+		cursor  = 'Reclaim',
+		tooltip = 'Queue a GBC reclaim job.',
+	},
+	{
+		flag    = "canResurrect",
+		id      = CMD_RESURRECT,
+		type    = CMDTYPE.ICON_UNIT_FEATURE_OR_AREA,
+		name    = 'Resurrect',
+		action  = 'resurrect',
+		cursor  = 'Resurrect',
+		tooltip = 'Queue a GBC resurrect job.',
+	},
+}
+
+local function AddWorkerCommands(customCommands)
+	-- Commands the selection already offers.
+	local existing = {}
+	local commands = widgetHandler.commands
+	if commands then
+		for _, command in pairs(commands) do
+			if type(command) == "table" and command.id then
+				existing[command.id] = true
+			end
+		end
+	end
+
+	-- Every unit type among our workers, once each.
+	local workerDefs = {}
+	for unitID in pairs(workers) do
+		local unitDefID = spGetUnitDefID(unitID)
+		if unitDefID then
+			workerDefs[unitDefID] = true
+		end
+	end
+
+	for i = 1, #workerCommands do
+		local command = workerCommands[i]
+		if not existing[command.id] then
+			for unitDefID in pairs(workerDefs) do
+				if UnitDefs[unitDefID][command.flag] then
+					customCommands[#customCommands+1] = {
+						id      = command.id,
+						type    = command.type,
+						name    = command.name,
+						action  = command.action,
+						cursor  = command.cursor,
+						tooltip = command.tooltip,
+					}
+					existing[command.id] = true
+					break
+				end
+			end
+		end
+	end
+
+	for unitDefID in pairs(workerDefs) do
+		local buildOptions = UnitDefs[unitDefID].buildOptions
+		for j = 1, #buildOptions do
+			local buildDefID = buildOptions[j]
+			local cmdID = -buildDefID
+			if not existing[cmdID] then
+				local buildDef = UnitDefs[buildDefID]
+				customCommands[#customCommands+1] = {
+					id      = cmdID,
+					type    = CMDTYPE.ICON_BUILDING,
+					name    = buildDef.name,
+					action  = 'buildunit_' .. buildDef.name,
+					tooltip = buildDef.humanName,
+				}
+				existing[cmdID] = true
+			end
+		end
+	end
+end
+
 -- Adds the Global Build on/off state button when a constructor is selected,
 -- showing the state of the first selected constructor.
 --
@@ -280,6 +382,7 @@ function widget:CommandsChanged()
 			cursor  = 'Repair',
 			action  = 'globalbuildcancel',
 		}
+		AddWorkerCommands(customCommands)
 	end
 end
 
