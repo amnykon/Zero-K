@@ -6,7 +6,7 @@
 --           players' queues, and (for spectators) everyone's queue.
 --
 --  This widget is the job store for Global Build Command v2
---  (unit_global_build_command_v2.lua): GBC v2 writes jobs through
+--  (unit_global_build_command.lua): GBC v2 writes jobs through
 --  WG.GlobalBuildQueueShare.Update()/Delete(), and this widget holds them,
 --  shares them with allies and spectators, and draws them. GBC v2 doesn't
 --  draw its own queue - this widget draws it for the local player too, not
@@ -28,7 +28,7 @@ function widget:GetInfo()
 		author    = "amnykon",
 		date      = "September 25, 2026",
 		license   = "GNU GPL, v2 or later",
-		layer     = 11, -- draws after unit_global_build_command.lua (layer 10)
+		layer     = 11,
 		enabled   = true, -- on by default, since it's pure information
 	}
 end
@@ -92,7 +92,7 @@ local CMD_RESURRECT = CMD.RESURRECT
 
 local floor = math.floor
 
--- Zero-K specific icons, matching unit_global_build_command.lua's own job icons.
+-- Zero-K specific icons, matching the old Global Build Command's job icons.
 local rep_icon = "LuaUI/Images/commands/Bold/repair.png"
 local rec_icon = "LuaUI/Images/commands/Bold/reclaim.png"
 local res_icon = "LuaUI/Images/commands/Bold/resurrect.png"
@@ -826,7 +826,7 @@ end
 -- Public API ------------------------------------------------------------------
 
 -- Derives a job's identity purely from the fields that define what it IS,
--- mirroring unit_global_build_command.lua's own BuildHash (which callers of
+-- mirroring the old Global Build Command's own BuildHash (which callers of
 -- this widget never need to know about or replicate themselves): a build
 -- job is defined by what's being built and where, a single-target repair/
 -- reclaim/resurrect job by its target, and an area one by its circle.
@@ -845,7 +845,7 @@ local function BuildJobHash(job)
 	end
 end
 
--- To be called (from unit_global_build_command_v2.lua or similar)
+-- To be called (from unit_global_build_command.lua or similar)
 -- whenever it adds a job or changes one it already has. `job` must have the
 -- fields documented in the network protocol comment above (id, x, y, z, and
 -- the optional h/r/target/reach/priority/unitID). Returns the jobId (see

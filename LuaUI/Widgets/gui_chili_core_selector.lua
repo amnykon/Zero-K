@@ -596,10 +596,17 @@ local function SelectPrecBomber()
 	Spring.SelectUnitArray(toBeSelected)
 end
 
+-- A constructor Global Build Command's worker AI is managing isn't idle in the
+-- sense the idle constructor button means - it's waiting for a GBC job.
+local function IsGBCWorker(unitID)
+	local gbc = WG.GlobalBuildCommand
+	return gbc and gbc.IsControllingUnit and gbc.IsControllingUnit(unitID)
+end
+
 local function SelectIdleCon_all()
 	local consToSelect = {}
 	for uid in pairs(idleCons) do
-		if uid and uid ~= "count" then
+		if uid and uid ~= "count" and not IsGBCWorker(uid) then
 			if IsConNotCarriedByEnemyTransport(uid) then
 				consToSelect[ConvertConIDToTransportIdCarryingItIfNeeded(uid)] = true
 			end
@@ -622,7 +629,7 @@ local function SelectIdleCon()
 		local muid = nil
 
 		for uid, v in pairs(idleCons) do
-			if uid ~= "count" then
+			if uid ~= "count" and not IsGBCWorker(uid) then
 				uid = ConvertConIDToTransportIdCarryingItIfNeeded(uid)
 				if (not Spring.IsUnitSelected(uid)) then
 					local x,_,z = spGetUnitPosition(uid)
@@ -643,7 +650,7 @@ local function SelectIdleCon()
 			conIndex = (conIndex % idleConCount) + 1
 			local i = 1
 			for uid, v in pairs(idleCons) do
-				if uid ~= "count" then
+				if uid ~= "count" and not IsGBCWorker(uid) then
 					if i == conIndex then
 						uid = ConvertConIDToTransportIdCarryingItIfNeeded(uid)
 						Spring.SelectUnit(uid)
@@ -1509,8 +1516,9 @@ local function GetConstructorButton(parent)
 		local total = 0
 		for unitID in pairs(idleCons) do
 			local transportID = fromConIDToCarryingTransportID[unitID]
-			-- only count idle constructors that aren't being carried by busy transports
-			if not (transportID and (not idleTransports[transportID])) then
+			-- only count idle constructors that aren't being carried by busy
+			-- transports, or managed by Global Build Command
+			if not (transportID and (not idleTransports[transportID])) and not IsGBCWorker(unitID) then
 				total = total + 1
 			end
 		end
@@ -1803,7 +1811,7 @@ end
 -------------------------------------------------------------------------------
 -- Global Build Command button
 --
--- Toggles GBC mode (unit_global_build_command_v2.lua), same as its hotkey, and
+-- Toggles GBC mode (unit_global_build_command.lua), same as its hotkey, and
 -- is highlighted while the mode is on, like the launch button while the
 -- launcher is open. The bottom label is how many jobs we have queued. Present
 -- while that widget is enabled; removes itself (UpdateButton returns false)
