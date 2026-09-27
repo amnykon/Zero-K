@@ -196,6 +196,9 @@ options_order = {
 	'shortHandedBonus', 'overStaffedCost',
 	'largeMinMetal', 'completionWeight', 'completionMinProgress',
 	'highMetalFrom', 'repairHighMetalCost',
+	'lowMetalBelow', 'reclaimHighMetalCost', 'reclaimLowMetalBonus',
+	'lowEnergyBelow', 'repairLowEnergyCost', 'resurrectLowEnergyCost',
+	'allyJobCost', 'waitingBonusPerMinute', 'waitingBonusMax', 'commanderTravelFactor',
 	'lowPriorityCost', 'highPriorityDiscount',
 }
 options = {
@@ -273,6 +276,38 @@ options = {
 	},
 	repairHighMetalCost = CostOption('Repair cost when metal is high',
 		'Added to repair jobs, scaled by how high metal is. Repair costs energy but no metal, so when metal is piling up, build power is better spent building.', 20),
+	lowMetalBelow = {
+		name = 'Low metal: below (share of storage)',
+		desc = 'Metal counts as low below this share of your metal storage (0 to 1), rising to fully low when storage is empty.',
+		type = 'number', min = 0, max = 1, step = 0.05, value = 0.2,
+		path = COSTS_PATH,
+	},
+	reclaimHighMetalCost = CostOption('Reclaim cost when metal is high',
+		'Added to reclaim jobs, scaled by how high metal is: reclaimed metal is wasted once storage is full.', 20),
+	reclaimLowMetalBonus = CostOption('Reclaim bonus when metal is low',
+		'Taken off reclaim jobs, scaled by how low metal is: reclaim is free metal.', 10),
+	lowEnergyBelow = {
+		name = 'Low energy: below (share of storage)',
+		desc = 'Energy counts as low below this share of your energy storage (0 to 1), rising to fully low when storage is empty.',
+		type = 'number', min = 0, max = 1, step = 0.05, value = 0.2,
+		path = COSTS_PATH,
+	},
+	repairLowEnergyCost = CostOption('Repair cost when energy is low',
+		'Added to repair jobs, scaled by how low energy is: repair costs energy.', 15),
+	resurrectLowEnergyCost = CostOption('Resurrect cost when energy is low',
+		'Added to resurrect jobs, scaled by how low energy is: resurrect costs a lot of energy.', 20),
+	allyJobCost = CostOption('Ally job cost',
+		'Added to jobs in allies\' queues, so your workers do your own queue first. 0 treats them the same as yours.', 5),
+	waitingBonusPerMinute = CostOption('Waiting bonus per minute',
+		'Taken off a job\'s cost for each minute it has waited with no workers on it, so far-off jobs don\'t wait forever.', 2),
+	waitingBonusMax = CostOption('Waiting bonus: maximum',
+		'The most the waiting bonus can take off a job\'s cost.', 20, 120),
+	commanderTravelFactor = {
+		name = 'Commander travel time factor',
+		desc = 'A commander\'s travel time counts this many times over, so it builds near where it is instead of walking out to the front. 1 treats it like any other worker.',
+		type = 'number', min = 1, max = 10, step = 0.25, value = 2,
+		path = COSTS_PATH,
+	},
 	lowPriorityCost = CostOption('Low priority job cost',
 		'Added to jobs marked low priority.', 15),
 	highPriorityDiscount = CostOption('High priority job discount',
@@ -409,7 +444,13 @@ end
 --     superweapon draws in every worker for whom it's the cheapest job.
 --   - high metal: repair jobs cost more the fuller metal storage is, since
 --     repair spends energy but no metal - piling-up metal is better turned
---     into buildings.
+--     into buildings. Reclaim jobs cost more too (reclaimed metal is wasted
+--     once storage is full), and less when metal is low.
+--   - low energy: repair and resurrect jobs cost more the emptier energy
+--     storage is, since both spend energy.
+--   - ally jobs cost a little more than our own.
+--   - waiting: a job gets cheaper the longer it waits with no workers on it.
+--   - commanders: their travel time counts extra, to keep them near home.
 --   - priority: low priority jobs cost more, and jobs the player marked high
 --     priority less. GBC never marks anything high itself.
 --   - switching: a worker already on a job only moves to another one if it's
@@ -565,10 +606,14 @@ local function PreferredWorkers(unitDef, avgBuildPower)
 	return math.max(options.minPreferred.value, math.min(options.maxPreferred.value, preferred))
 end
 
+-- waitingSince[key] = game frame since which a job has had no workers on it.
+local waitingSince = {}
+
 -- Every job in our own and our allies' queues that can still be worked on,
 -- with what the cost needs precomputed once per update.
-local function CollectJobs(share, avgBuildPower)
+local function CollectJobs(share, avgBuildPower, frame)
 	local jobs = {}
+	local stillWaiting = {}
 	local myAllyTeamID = spGetMyAllyTeamID()
 	local players = spGetPlayerList()
 	for i = 1, #players do
@@ -605,7 +650,15 @@ local function CollectJobs(share, avgBuildPower)
 						unitID = nil
 					end
 					local unitDef = JobUnitDef(cmd, target)
+					local waitingBonus = 0
+					if share.GetWorkerCount(owner, jobId) == 0 then
+						local since = waitingSince[key] or frame
+						stillWaiting[key] = since
+						local minutes = (frame - since) / (30 * 60)
+						waitingBonus = math.min(options.waitingBonusMax.value, minutes * options.waitingBonusPerMinute.value)
+					end
 					jobs[#jobs+1] = {
+						waitingBonus = waitingBonus,
 						key = key, owner = owner, jobId = jobId, cmd = cmd,
 						x = x, y = share.GetY(owner, jobId), z = z,
 						h = share.GetH(owner, jobId), r = share.GetR(owner, jobId),
@@ -621,6 +674,7 @@ local function CollectJobs(share, avgBuildPower)
 			end
 		end
 	end
+	waitingSince = stillWaiting
 	return jobs
 end
 
@@ -633,33 +687,55 @@ local function JobCommand(job)
 	return job.cmd
 end
 
--- How high the managed team's metal is, from 0 (at or below the high metal
--- threshold) to 1 (storage full). Set each update.
-local metalHigh = 0
-
-local function UpdateMetalHigh()
-	metalHigh = 0
-	local current, storage = spGetTeamResources(managedTeamID, "metal")
+-- How full the managed team's storage of a resource is, 0 to 1, leaving
+-- out the hidden storage. nil if there's no storage to speak of.
+local function StorageFullness(resource)
+	local current, storage = spGetTeamResources(managedTeamID, resource)
 	if not current then
-		return
+		return nil
 	end
 	storage = storage - (HIDDEN_STORAGE or 0)
 	if storage <= 0 then
-		return
+		return nil
 	end
-	local from = options.highMetalFrom.value
-	local fullness = math.min(1, current / storage)
-	if from >= 1 then
-		metalHigh = (fullness >= 1) and 1 or 0
-	elseif fullness > from then
-		metalHigh = (fullness - from) / (1 - from)
-	end
+	return math.max(0, math.min(1, current / storage))
 end
 
-local function JobCost(wx, wz, speed, buildDistance, job, currentKey)
+-- 0 at or below 'from', rising to 1 when full.
+local function HighAmount(fullness, from)
+	if not fullness then
+		return 0
+	end
+	if from >= 1 then
+		return (fullness >= 1) and 1 or 0
+	end
+	return math.max(0, (fullness - from) / (1 - from))
+end
+
+-- 0 at or above 'below', rising to 1 when empty.
+local function LowAmount(fullness, below)
+	if not fullness or below <= 0 then
+		return 0
+	end
+	return math.max(0, (below - fullness) / below)
+end
+
+-- How high metal is, how low metal is and how low energy is, each 0 to 1.
+-- Set each update.
+local metalHigh, metalLow, energyLow = 0, 0, 0
+
+local function UpdateResources()
+	local metal = StorageFullness("metal")
+	metalHigh = HighAmount(metal, options.highMetalFrom.value)
+	metalLow = LowAmount(metal, options.lowMetalBelow.value)
+	energyLow = LowAmount(StorageFullness("energy"), options.lowEnergyBelow.value)
+end
+
+
+local function JobCost(wx, wz, speed, buildDistance, job, currentKey, travelFactor)
 	local dx, dz = wx - job.x, wz - job.z
 	local distance = math.sqrt(dx*dx + dz*dz) - buildDistance - (job.r or 0)
-	local cost = math.max(0, distance) / speed
+	local cost = math.max(0, distance) / speed * travelFactor
 
 	-- Workers on it besides this one.
 	local crowd = job.others + (ourCount[job.key] or 0)
@@ -690,7 +766,19 @@ local function JobCost(wx, wz, speed, buildDistance, job, currentKey)
 	-- does spend metal).
 	if job.cmd == CMD_REPAIR then
 		cost = cost + options.repairHighMetalCost.value * metalHigh
+			+ options.repairLowEnergyCost.value * energyLow
+	elseif job.cmd == CMD_RECLAIM then
+		cost = cost + options.reclaimHighMetalCost.value * metalHigh
+			- options.reclaimLowMetalBonus.value * metalLow
+	elseif job.cmd == CMD_RESURRECT then
+		cost = cost + options.resurrectLowEnergyCost.value * energyLow
 	end
+
+	if job.owner ~= spGetMyPlayerID() then
+		cost = cost + options.allyJobCost.value
+	end
+
+	cost = cost - job.waitingBonus
 
 	if job.priority == 0 then
 		cost = cost + options.lowPriorityCost.value
@@ -779,10 +867,14 @@ local function AverageBuildPower()
 	return (count > 0) and (total / count) or DEFAULT_BUILD_POWER
 end
 
+local function IsCommander(unitDef)
+	return unitDef.customParams.commtype or unitDef.customParams.dynamic_comm
+end
+
 local function UpdateWorkers(share)
-	UpdateMetalHigh()
-	local jobs = CollectJobs(share, AverageBuildPower())
+	UpdateResources()
 	local frame = spGetGameFrame()
+	local jobs = CollectJobs(share, AverageBuildPower(), frame)
 	for unitID in pairs(workers) do
 		if CheckWorker(unitID, share, frame) then
 			local unitDefID = spGetUnitDefID(unitID)
@@ -790,6 +882,7 @@ local function UpdateWorkers(share)
 			local wx, _, wz = spGetUnitPosition(unitID)
 			if ud and wx and ud.speed > 0 then
 				local speed = ud.speed * (spGetUnitRulesParam(unitID, "totalStaticMoveSpeedChange") or 1)
+				local travelFactor = IsCommander(ud) and options.commanderTravelFactor.value or 1
 				local currentKey = assignment[unitID]
 				local failed = failedUntil[unitID]
 				local best, bestCost, currentCost
@@ -797,7 +890,7 @@ local function UpdateWorkers(share)
 					local job = jobs[j]
 					if not (failed and failed[job.key] and failed[job.key] > frame)
 							and spFindUnitCmdDesc(unitID, JobCommand(job)) then
-						local cost = JobCost(wx, wz, speed, ud.buildDistance, job, currentKey)
+						local cost = JobCost(wx, wz, speed, ud.buildDistance, job, currentKey, travelFactor)
 						if job.key == currentKey then
 							currentCost = cost
 						end
