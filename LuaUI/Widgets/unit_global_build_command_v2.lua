@@ -457,8 +457,46 @@ function widget:CommandNotify(cmdID, params, opts)
 	return false
 end
 
+-- For other widgets, eg. the Quick Selection Bar's GBC button
+-- (gui_chili_core_selector.lua).
+local externalFunctions = {}
+
+function externalFunctions.IsActive()
+	return active
+end
+
+function externalFunctions.SetActive(on)
+	if on ~= active then
+		SetActive(on)
+	end
+end
+
+function externalFunctions.Toggle()
+	SetActive(not active)
+end
+
+-- The toggle's current hotkey, readable, or "" if it has none.
+function externalFunctions.GetHotkey()
+	local hotkey = WG.crude and WG.crude.GetOptionHotkey and WG.crude.GetOptionHotkey(options.toggle.path, options.toggle)
+	return hotkey or ""
+end
+
+-- How many jobs we own in the shared queue.
+function externalFunctions.GetJobCount()
+	local share = WG.GlobalBuildQueueShare
+	if not share then
+		return 0
+	end
+	return #share.GetJobIds(spGetMyPlayerID())
+end
+
 function widget:Initialize()
 	UpdateManagedTeam(true)
+	WG.GlobalBuildCommandV2 = externalFunctions
+end
+
+function widget:Shutdown()
+	WG.GlobalBuildCommandV2 = nil
 end
 
 function widget:PlayerChanged(playerID)
@@ -547,9 +585,9 @@ function widget:DrawScreen()
 		return
 	end
 	local mx, my = spGetMouseState()
-	local hotkey = WG.crude and WG.crude.GetOptionHotkey and WG.crude.GetOptionHotkey(options.toggle.path, options.toggle)
+	local hotkey = externalFunctions.GetHotkey()
 	local label = "GBC"
-	if hotkey and hotkey ~= "" then
+	if hotkey ~= "" then
 		label = label .. " (" .. hotkey .. ")"
 	end
 	gl.Color(1.0, 0.8, 0.2, 1)
