@@ -34,10 +34,10 @@
 --
 --  Job identity is derived by Update() itself from the job's own content
 --  (see gui_global_build_queue_ally.lua's BuildJobHash) - this widget never
---  computes a hash itself, just keeps whatever jobId each Update() call
---  hands back, to pass to Delete() later. Placing the same building at the
---  same spot again naturally updates that same job rather than queuing a
---  duplicate, since it hashes to the same jobId both times.
+--  computes a hash itself, and reads its own jobs back from the store rather
+--  than keeping a list of them. Placing the same building at the same spot
+--  again naturally updates that same job rather than queuing a duplicate,
+--  since it hashes to the same jobId both times.
 --
 --------------------------------------------------------------------------------
 --------------------------------------------------------------------------------
@@ -89,11 +89,6 @@ end
 --------------------------------------------------------------------------------
 
 local active = false -- GBC mode on/off, toggled by the toggle hotkey
-
--- Every job this widget has queued (jobId -> {x, z}), so a right-drag knows
--- what it's allowed to remove without touching anything else's jobs. jobId
--- is whatever Update() below assigned - this widget never computes one itself.
-local myJobs = {}
 
 local dragX, dragZ, dragR -- in-progress right-drag for area removal
 
@@ -223,25 +218,29 @@ local function SetGlobalBuildState(state)
 	end
 end
 
--- Removes every job this widget queued whose position is inside the circle.
--- Shared by right-drag removal and the Global Build Cancel command.
+-- Removes every job of ours whose position is inside the circle. Reads our
+-- jobs from the job store rather than keeping its own list, so jobs the store
+-- got back after a reload or rejoin can be removed too. Shared by right-drag
+-- removal and the Global Build Cancel command.
 local function RemoveJobsInCircle(x, z, r)
-	if not WG.GlobalBuildQueueShare then
+	local share = WG.GlobalBuildQueueShare
+	if not share then
 		return
 	end
+	local myPlayerID = spGetMyPlayerID()
 	local rSq = r * r
-	for jobId, pos in pairs(myJobs) do
-		if DistanceSq(x, z, pos.x, pos.z) <= rSq then
-			WG.GlobalBuildQueueShare.Delete(jobId)
-			myJobs[jobId] = nil
+	local jobIds = share.GetJobIds(myPlayerID)
+	for i = 1, #jobIds do
+		local jobId = jobIds[i]
+		local jx, jz = share.GetX(myPlayerID, jobId), share.GetZ(myPlayerID, jobId)
+		if jx and DistanceSq(x, z, jx, jz) <= rSq then
+			share.Delete(jobId)
 		end
 	end
 end
 
--- Queues one job and remembers it for right-drag removal.
 local function QueueJob(job)
-	local jobId = WG.GlobalBuildQueueShare.Update(job)
-	myJobs[jobId] = {x = job.x, z = job.z}
+	WG.GlobalBuildQueueShare.Update(job)
 end
 
 --------------------------------------------------------------------------------

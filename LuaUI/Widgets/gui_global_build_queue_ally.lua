@@ -57,6 +57,8 @@ options = {
 -- "Localized" API calls, because they run ~33% faster in lua.
 local spGetMyPlayerID       = Spring.GetMyPlayerID
 local spGetPlayerInfo       = Spring.GetPlayerInfo
+local spGetMyAllyTeamID     = Spring.GetMyAllyTeamID
+local spGetSpectatingState  = Spring.GetSpectatingState
 local spSendLuaUIMsg        = Spring.SendLuaUIMsg
 local spGetUnitPosition     = Spring.GetUnitPosition
 local spGetFeaturePosition  = Spring.GetFeaturePosition
@@ -104,10 +106,26 @@ local res_color = {0.4, 0.8, 1.0, 1.0}
 -- keeps a batch to a few KB at most, so there's no need to split a send
 -- across multiple messages or reassemble one on the receiving end.
 --
--- "GBCQ|S" - a sync request, sent once by a newly-initialized widget. Anyone
--- receiving it marks all of their own currently-owned jobIds as pending (see
--- MarkAllOwnJobsPending), so they go out through the ordinary delta path
--- below rather than needing a separate "full snapshot" message shape.
+-- "GBCQ|S,<nonce>" - a sync request, sent once by a newly-initialized widget
+-- (a LuaUI reload, a rejoin, or the widget enabled mid-game). Anyone
+-- receiving it does two things:
+--   - marks all of their own currently-owned jobIds as pending (see
+--     MarkAllOwnJobsPending), so they go out through the ordinary delta path
+--     below rather than needing a separate "full snapshot" message shape.
+--   - sends back the copy they hold of the requester's own queue (see
+--     SendRestore), so the requester gets its own jobs back - they only
+--     lived in the widget's memory, and a reload or rejoin loses them.
+-- <nonce> is a random number picked per request. Restores quote it back, and
+-- the requester only accepts restores quoting its current nonce, so an old
+-- restore replayed during a rejoin's catch-up (see below) is ignored.
+--
+-- "GBCQ|O,<ownerPlayerID>,<nonce>;<U records>" - a restore: the U records
+-- that follow are ownerPlayerID's own jobs, sent back by an ally holding a
+-- copy. Only ownerPlayerID applies them, and only from allies (never
+-- spectators, who could otherwise write into a player's own queue). It
+-- accepts restores from the first ally to answer and ignores the rest, since
+-- every ally should hold the same copy. A big queue is split over several
+-- messages, each starting with the same header.
 --
 -- "GBCQ|<data>" - a delta. <data> is zero or more ';'-terminated records,
 -- applied on top of whatever the receiver already has, each of one of three
@@ -166,11 +184,36 @@ local res_color = {0.4, 0.8, 1.0, 1.0}
 -- packet stream (including SendLuaUIMsg) from the start of the game, the same
 -- way demo playback does. The sync request above exists for the other case a
 -- one-off full send would otherwise be needed for: a widget enabled mid-game,
--- which never received any of the deltas sent before it existed.
+-- which never received any of the deltas sent before it existed. The replay
+-- doesn't restore a rejoining player's own queue, since RecvLuaMsg ignores
+-- our own messages - the restore above covers that, if we have allies.
+--
+-- Who is listened to: only players, never spectators, since a spectator's
+-- jobs would otherwise reach allies' worker AIs. A player only listens to its
+-- own allies; a spectator listens to every player. (The engine only delivers
+-- "a" messages to allies anyway, but a message sent to everyone would reach
+-- enemies too.) Sync requests are the exception: anyone may send one, since
+-- spectators need the data as well and answering one only resends our own.
 local MSG_PREFIX = "GBCQ|"
 local MAX_UPDATES_PER_SEND = 50 -- caps how many changed jobs go out in one delta, so a big burst spreads over multiple sends rather than spiking that one frame's message count
 
 local myPlayerID = spGetMyPlayerID()
+
+-- Our current sync request's nonce (see the network protocol comment above),
+-- and the ally whose restore we accepted for it, so we don't mix copies.
+-- Restores are only accepted for RESTORE_WINDOW seconds of being caught up
+-- after the request, after which syncNonce is cleared.
+local syncNonce = nil
+local restoreFrom = nil
+local restoreTimer = 0
+local RESTORE_WINDOW = 30
+
+-- Whether we're catching up to the server (a rejoin), from GameProgress, as
+-- gui_recv_indicator.lua does. While catching up, messages are replays of
+-- old ones, so sync requests among them aren't answered: our copy of the
+-- requester's queue would be from the replay's past, not the present.
+local catchingUp = false
+local CATCHING_UP_FRAMES = 120
 
 -- Job data is stored as a separate flat dictionary per field (a "struct of
 -- arrays"), each keyed by job id, instead of one dictionary of small per-job
@@ -382,6 +425,29 @@ local function BroadcastPending()
 	SendBatch(records)
 end
 
+-- Answers a sync request by sending requesterID back its own jobs, as we
+-- hold them - see the "O" message in the network protocol comment. Sends
+-- nothing if we hold none. Split into messages of MAX_UPDATES_PER_SEND jobs.
+local function SendRestore(requesterID, nonce)
+	local header = "O," .. requesterID .. "," .. nonce .. ";"
+	local prefix = requesterID .. "#"
+	local records = {header}
+	for key, owner in pairs(jobOwner) do
+		if owner == requesterID then
+			local jobId = key:sub(#prefix + 1)
+			records[#records+1] = EncodeUpsert(jobId, cmdId[key], jobX[key], jobY[key], jobZ[key],
+				jobH[key], jobR[key], jobTarget[key], jobReach[key], jobPriority[key], jobUnitID[key])
+			if #records > MAX_UPDATES_PER_SEND then
+				SendBatch(records)
+				records = {header}
+			end
+		end
+	end
+	if #records > 1 then
+		SendBatch(records)
+	end
+end
+
 --------------------------------------------------------------------------------
 --------------------------------------------------------------------------------
 -- Receiving -----------------------------------------------------------------
@@ -448,13 +514,51 @@ local function ClearJob(key)
 	end
 end
 
+-- Whether to apply records sent by playerID - see "Who is listened to" in
+-- the network protocol comment.
+local function IsTrustedSender(playerID)
+	local _, _, isSpec, _, allyTeamID = spGetPlayerInfo(playerID, false)
+	if isSpec ~= false then -- a spectator, or not a valid player
+		return false
+	end
+	return spGetSpectatingState() or allyTeamID == spGetMyAllyTeamID()
+end
+
+-- Whether an "O" restore header, sent by playerID, is one we should apply:
+-- addressed to us, for our current sync request, and from the first ally to
+-- answer it.
+local function AcceptRestore(playerID, rest)
+	local ownerPlayerID, nonce = rest:match("^(%d+),(%d+)$")
+	if tonumber(ownerPlayerID) ~= myPlayerID or not syncNonce or nonce ~= syncNonce then
+		return false
+	end
+	if restoreFrom and restoreFrom ~= playerID then
+		return false
+	end
+	restoreFrom = playerID
+	return true
+end
+
 local function ApplyRecordsData(playerID, data)
+	-- Whose jobs "U" records are: the sender's, unless an "O" restore header
+	-- says they're our own being sent back. restoring stays false for a
+	-- restore we're not accepting, and skips the rest of the message.
+	local ownerID = playerID
+	local restoring = false
+	local first = true
 	for record in data:gmatch("([^;]+);") do
 		local op, rest = DecodeRecord(record)
-		if op == "U" then
+		if op == "O" then
+			if not first or not AcceptRestore(playerID, rest) then
+				return -- not ours, or not the first record: drop the message
+			end
+			restoring = true
+			ownerID = myPlayerID
+		elseif op == "U" then
 			local jobId, decodedCmdId, x, y, z, h, r, target, reach, priority, unitID = DecodeUpsert(rest)
-			if jobId then
-				local key = playerID .. "#" .. jobId
+			-- A restore never overwrites a job we already have again locally.
+			if jobId and not (restoring and jobOwner[ownerID .. "#" .. jobId]) then
+				local key = ownerID .. "#" .. jobId
 				cmdId[key] = decodedCmdId
 				jobX[key] = x
 				jobY[key] = y
@@ -465,8 +569,10 @@ local function ApplyRecordsData(playerID, data)
 				jobReach[key] = reach
 				jobPriority[key] = priority
 				SetJobUnitID(key, unitID)
-				jobOwner[key] = playerID
+				jobOwner[key] = ownerID
 			end
+		elseif restoring then
+			-- A restore only carries "U" records.
 		elseif op == "R" then
 			ClearJob(playerID .. "#" .. rest)
 		elseif op == "A" then
@@ -475,6 +581,7 @@ local function ApplyRecordsData(playerID, data)
 				SetAssist(ownerPlayerID .. "#" .. jobId, playerID, workers)
 			end
 		end
+		first = false
 	end
 end
 
@@ -487,11 +594,19 @@ function widget:RecvLuaMsg(msg, playerID)
 	end
 	local rest = msg:sub(#MSG_PREFIX + 1)
 
-	if rest == "S" then
+	local nonce = rest:match("^S,(%d+)$")
+	if nonce then
+		if catchingUp then
+			return
+		end
 		MarkAllOwnJobsPending()
+		SendRestore(playerID, nonce)
 		return
 	end
 
+	if not IsTrustedSender(playerID) then
+		return
+	end
 	ApplyRecordsData(playerID, rest)
 end
 
@@ -537,8 +652,18 @@ end
 --------------------------------------------------------------------------------
 -- Update -----------------------------------------------------------------
 
+function widget:GameProgress(serverFrame)
+	catchingUp = (serverFrame - Spring.GetGameFrame()) > CATCHING_UP_FRAMES
+end
+
 function widget:Update(dt)
 	BroadcastPending()
+	if syncNonce and not catchingUp then
+		restoreTimer = restoreTimer + dt
+		if restoreTimer > RESTORE_WINDOW then
+			syncNonce = nil
+		end
+	end
 end
 
 --------------------------------------------------------------------------------
@@ -864,8 +989,13 @@ function widget:Initialize()
 	-- Ask everyone else to (re-)send their current queue, since we won't have
 	-- seen any of the deltas from before we existed (eg. this widget just got
 	-- enabled mid-game).
-	spSendLuaUIMsg(MSG_PREFIX .. "S", "a")
-	spSendLuaUIMsg(MSG_PREFIX .. "S", "s")
+	-- The same request also gets our own queue sent back by an ally, if a
+	-- reload or rejoin lost it.
+	syncNonce = tostring(math.random(1, 1000000000))
+	restoreFrom = nil
+	restoreTimer = 0
+	spSendLuaUIMsg(MSG_PREFIX .. "S," .. syncNonce, "a")
+	spSendLuaUIMsg(MSG_PREFIX .. "S," .. syncNonce, "s")
 	WG.GlobalBuildQueueShare = {
 		Update = UpdateJob,
 		Delete = DeleteJob,
