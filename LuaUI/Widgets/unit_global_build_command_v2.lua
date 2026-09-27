@@ -72,6 +72,7 @@ local spGetUnitDefID      = Spring.GetUnitDefID
 local spGetSelectedUnits  = Spring.GetSelectedUnits
 local spGetUnitTeam       = Spring.GetUnitTeam
 local spGetUnitRulesParam = Spring.GetUnitRulesParam
+local spGetUnitCmdDescs   = Spring.GetUnitCmdDescs
 
 local CMD_REPAIR    = CMD.REPAIR
 local CMD_RECLAIM   = CMD.RECLAIM
@@ -300,12 +301,36 @@ local function AddWorkerCommands(customCommands)
 		end
 	end
 
-	-- Every unit type among our workers, once each.
+	-- Every unit type among our workers, once each. Field factory builders
+	-- (the support commander's engineer) are the exception: their UnitDef
+	-- lists every factory unit, but unit_field_factory.lua leaves each unit
+	-- only the build command for the one unit it's copying, so read those
+	-- builders' actual build commands instead.
 	local workerDefs = {}
+	local buildDefIDs = {}
 	for unitID in pairs(workers) do
 		local unitDefID = spGetUnitDefID(unitID)
 		if unitDefID then
+			if UnitDefs[unitDefID].customParams.field_factory then
+				local cmdDescs = spGetUnitCmdDescs(unitID)
+				if cmdDescs then
+					for j = 1, #cmdDescs do
+						local cmdDesc = cmdDescs[j]
+						if cmdDesc.id < 0 and not cmdDesc.disabled then
+							buildDefIDs[-cmdDesc.id] = true
+						end
+					end
+				end
+			end
 			workerDefs[unitDefID] = true
+		end
+	end
+	for unitDefID in pairs(workerDefs) do
+		if not UnitDefs[unitDefID].customParams.field_factory then
+			local buildOptions = UnitDefs[unitDefID].buildOptions
+			for j = 1, #buildOptions do
+				buildDefIDs[buildOptions[j]] = true
+			end
 		end
 	end
 
@@ -329,22 +354,18 @@ local function AddWorkerCommands(customCommands)
 		end
 	end
 
-	for unitDefID in pairs(workerDefs) do
-		local buildOptions = UnitDefs[unitDefID].buildOptions
-		for j = 1, #buildOptions do
-			local buildDefID = buildOptions[j]
-			local cmdID = -buildDefID
-			if not existing[cmdID] then
-				local buildDef = UnitDefs[buildDefID]
-				customCommands[#customCommands+1] = {
-					id      = cmdID,
-					type    = CMDTYPE.ICON_BUILDING,
-					name    = buildDef.name,
-					action  = 'buildunit_' .. buildDef.name,
-					tooltip = buildDef.humanName,
-				}
-				existing[cmdID] = true
-			end
+	for buildDefID in pairs(buildDefIDs) do
+		local cmdID = -buildDefID
+		if not existing[cmdID] then
+			local buildDef = UnitDefs[buildDefID]
+			customCommands[#customCommands+1] = {
+				id      = cmdID,
+				type    = CMDTYPE.ICON_BUILDING,
+				name    = buildDef.name,
+				action  = 'buildunit_' .. buildDef.name,
+				tooltip = buildDef.humanName,
+			}
+			existing[cmdID] = true
 		end
 	end
 end
