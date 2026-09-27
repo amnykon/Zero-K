@@ -1,7 +1,7 @@
 --------------------------------------------------------------------------------
 --------------------------------------------------------------------------------
 --
---  file:    dbg_gbc_queue_share_test.lua
+--  file:    unit_global_build_command_v2.lua
 --  brief:   Start of a new Global Build Command. While GBC mode is on, every
 --           build/repair/reclaim/resurrect order you give is queued into
 --           WG.GlobalBuildQueueShare (gui_global_build_queue_ally.lua)
@@ -38,7 +38,7 @@
 
 function widget:GetInfo()
 	return {
-		name      = "GBC Queue Share Test",
+		name      = "Global Build Command v2",
 		desc      = "Start of a new Global Build Command: while toggled on (Tab by default), build/repair/reclaim/resurrect orders are queued into WG.GlobalBuildQueueShare instead of given to the selected units.",
 		author    = "amnykon",
 		date      = "September 26, 2026",
