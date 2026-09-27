@@ -190,9 +190,9 @@ options_path = 'Settings/Unit Behaviour/Worker AI'
 options_order = {
 	'toggle', 'workerAI', 'updateRate',
 	'switchCost',
-	'smallMaxMetal', 'largeMinMetal',
-	'smallFree', 'smallPerWorker', 'mediumFree', 'mediumPerWorker', 'largeFree', 'largePerWorker',
-	'completionWeight', 'completionMinProgress',
+	'targetFinishTime', 'minPreferred', 'maxPreferred', 'areaPreferred',
+	'shortHandedBonus', 'overStaffedCost',
+	'largeMinMetal', 'completionWeight', 'completionMinProgress',
 	'lowPriorityCost', 'highPriorityDiscount',
 }
 options = {
@@ -220,47 +220,45 @@ options = {
 	-- travel time to the job plus these kickers.
 	switchCost = CostOption('Switch cost',
 		'Extra cost of pulling a worker off the job it is on: it only switches if another job is cheaper by more than this.', 5),
-	smallMaxMetal = {
-		name = 'Small project: up to (metal)',
-		desc = 'Jobs costing up to this much metal are small projects. Area, reclaim and resurrect jobs count as small.',
-		type = 'number', min = 0, max = 2000, step = 10, value = 200,
+	targetFinishTime = {
+		name = 'Target finish time (seconds)',
+		desc = 'Sets each job\'s preferred worker count: enough average GBC workers to build it in about this long. A building\'s count is fixed for its whole build; repair uses the target\'s build time.',
+		type = 'number', min = 5, max = 300, step = 5, value = 30,
 		path = COSTS_PATH,
 	},
+	minPreferred = {
+		name = 'Preferred workers: minimum',
+		desc = 'The smallest preferred worker count any job gets.',
+		type = 'number', min = 1, max = 20, step = 1, value = 1,
+		path = COSTS_PATH,
+	},
+	maxPreferred = {
+		name = 'Preferred workers: maximum',
+		desc = 'The largest preferred worker count any job gets.',
+		type = 'number', min = 1, max = 60, step = 1, value = 10,
+		path = COSTS_PATH,
+	},
+	areaPreferred = {
+		name = 'Preferred workers: area, reclaim and resurrect jobs',
+		desc = 'Preferred worker count for jobs whose amount of work isn\'t known up front.',
+		type = 'number', min = 1, max = 20, step = 1, value = 2,
+		path = COSTS_PATH,
+	},
+	shortHandedBonus = CostOption('Short-handed bonus per missing worker',
+		'Taken off a started job\'s cost for each worker it is short of its preferred count, so crews fill started jobs before new ones are started. A job counts as started once it has a unit or a worker on it.', 2),
+	overStaffedCost = CostOption('Over-staffed cost per extra worker',
+		'Added to a job\'s cost for each worker beyond its preferred count. For large projects past the completion bonus threshold it fades with build progress.', 10),
 	largeMinMetal = {
 		name = 'Large project: from (metal)',
-		desc = 'Jobs costing at least this much metal are large projects. Between the two is medium.',
+		desc = 'Jobs costing at least this much metal are large projects: they get the completion bonus, and their over-staffed cost fades as they near completion.',
 		type = 'number', min = 0, max = 10000, step = 50, value = 1000,
 		path = COSTS_PATH,
 	},
-	smallFree = {
-		name = 'Small project: free workers',
-		desc = 'How many workers can be on a small project before each extra one costs more.',
-		type = 'number', min = 0, max = 20, step = 1, value = 1,
-		path = COSTS_PATH,
-	},
-	smallPerWorker = CostOption('Small project: cost per extra worker',
-		'Added for each worker beyond the free ones already on a small project.', 10),
-	mediumFree = {
-		name = 'Medium project: free workers',
-		desc = 'How many workers can be on a medium project before each extra one costs more.',
-		type = 'number', min = 0, max = 20, step = 1, value = 2,
-		path = COSTS_PATH,
-	},
-	mediumPerWorker = CostOption('Medium project: cost per extra worker',
-		'Added for each worker beyond the free ones already on a medium project.', 5),
-	largeFree = {
-		name = 'Large project: free workers',
-		desc = 'How many workers can be on a large project before each extra one costs more.',
-		type = 'number', min = 0, max = 40, step = 1, value = 4,
-		path = COSTS_PATH,
-	},
-	largePerWorker = CostOption('Large project: cost per extra worker',
-		'Added for each worker beyond the free ones already on a large project.', 2),
 	completionWeight = CostOption('Large project: completion bonus',
 		'Taken off a large project\'s cost, scaled by its build progress, so nearly finished ones pull workers in to finish them.', 20),
 	completionMinProgress = {
 		name = 'Large project: completion bonus from',
-		desc = 'Build progress (0 to 1) a large project needs before the completion bonus applies.',
+		desc = 'Build progress (0 to 1) a large project needs before the completion bonus applies and its over-staffed cost starts fading.',
 		type = 'number', min = 0, max = 1, step = 0.05, value = 0.5,
 		path = COSTS_PATH,
 	},
@@ -390,9 +388,14 @@ end
 -- store. Costs are in seconds:
 --   - travel time: distance to the job, less the worker's build range (and an
 --     area job's radius), divided by the worker's speed.
---   - crowding: each project size (small/medium/large, by metal cost) lets a
---     number of workers on for free, and each one beyond that adds a cost.
---   - completion: large projects get cheaper the closer they are to finished.
+--   - preferred workers: each job has a preferred worker count, enough
+--     average GBC workers to build it in the target finish time (fixed for
+--     the whole build). A started job short of it gets a bonus per missing
+--     worker, so crews fill started jobs before new ones get started; any job
+--     past it costs more per extra worker.
+--   - completion: large projects get cheaper the closer they are to finished,
+--     and their over-staffed cost fades with progress, so a nearly finished
+--     superweapon draws in every worker for whom it's the cheapest job.
 --   - priority: low priority jobs cost more, and jobs the player marked high
 --     priority less. GBC never marks anything high itself.
 --   - switching: a worker already on a job only moves to another one if it's
@@ -525,28 +528,32 @@ local function CleanOwnJobs(share)
 	end
 end
 
-local function JobSize(cmd, target)
-	local metal
+-- The UnitDef a job builds or repairs, or nil for area, reclaim and
+-- resurrect jobs.
+local function JobUnitDef(cmd, target)
 	if cmd < 0 then
-		metal = UnitDefs[-cmd].metalCost
+		return UnitDefs[-cmd]
 	elseif cmd == CMD_REPAIR and target and target < Game.maxUnits then
 		local unitDefID = spGetUnitDefID(target)
-		metal = unitDefID and UnitDefs[unitDefID].metalCost
+		return unitDefID and UnitDefs[unitDefID]
 	end
-	if not metal then
-		return "small" -- area, reclaim and resurrect jobs
+end
+
+-- How many workers a job wants: enough workers of average build power to
+-- build it in the target finish time. From the whole build time, so it
+-- doesn't change as the job progresses.
+local function PreferredWorkers(unitDef, avgBuildPower)
+	if not unitDef then
+		return options.areaPreferred.value
 	end
-	if metal >= options.largeMinMetal.value then
-		return "large"
-	elseif metal > options.smallMaxMetal.value then
-		return "medium"
-	end
-	return "small"
+	local buildTime = unitDef.buildTime or unitDef.metalCost or 0
+	local preferred = math.ceil(buildTime / (avgBuildPower * options.targetFinishTime.value))
+	return math.max(options.minPreferred.value, math.min(options.maxPreferred.value, preferred))
 end
 
 -- Every job in our own and our allies' queues that can still be worked on,
 -- with what the cost needs precomputed once per update.
-local function CollectJobs(share)
+local function CollectJobs(share, avgBuildPower)
 	local jobs = {}
 	local myAllyTeamID = spGetMyAllyTeamID()
 	local players = spGetPlayerList()
@@ -583,12 +590,14 @@ local function CollectJobs(share)
 					else
 						unitID = nil
 					end
+					local unitDef = JobUnitDef(cmd, target)
 					jobs[#jobs+1] = {
 						key = key, owner = owner, jobId = jobId, cmd = cmd,
 						x = x, y = share.GetY(owner, jobId), z = z,
 						h = share.GetH(owner, jobId), r = share.GetR(owner, jobId),
 						target = target, unitID = unitID, progress = progress,
-						size = JobSize(cmd, target),
+						preferred = PreferredWorkers(unitDef, avgBuildPower),
+						large = unitDef and (unitDef.metalCost or 0) >= options.largeMinMetal.value,
 						priority = share.GetPriority(owner, jobId),
 						-- Other players' workers on it; ours are added from ourCount,
 						-- which changes as this update assigns workers.
@@ -615,17 +624,28 @@ local function JobCost(wx, wz, speed, buildDistance, job, currentKey)
 	local distance = math.sqrt(dx*dx + dz*dz) - buildDistance - (job.r or 0)
 	local cost = math.max(0, distance) / speed
 
-	local size = job.size
+	-- Workers on it besides this one.
 	local crowd = job.others + (ourCount[job.key] or 0)
 	if currentKey == job.key then
-		crowd = crowd - 1 -- not counting ourselves
+		crowd = crowd - 1
 	end
-	local free = options[size .. "Free"].value
-	if crowd >= free then
-		cost = cost + (crowd - free + 1) * options[size .. "PerWorker"].value
+	local preferred = job.preferred
+	local nearlyDone = job.large and job.progress and job.progress >= options.completionMinProgress.value
+
+	if crowd < preferred then
+		local started = job.unitID or crowd > 0
+		if started then
+			cost = cost - (preferred - crowd) * options.shortHandedBonus.value
+		end
+	else
+		local perExtra = options.overStaffedCost.value
+		if nearlyDone then
+			perExtra = perExtra * (1 - job.progress)
+		end
+		cost = cost + (crowd - preferred + 1) * perExtra
 	end
 
-	if size == "large" and job.progress and job.progress >= options.completionMinProgress.value then
+	if nearlyDone then
 		cost = cost - options.completionWeight.value * job.progress
 	end
 
@@ -701,8 +721,23 @@ local function CheckWorker(unitID, share, frame)
 	return true
 end
 
+-- Average build power of our GBC workers, the unit of preferred worker counts.
+local DEFAULT_BUILD_POWER = 5
+local function AverageBuildPower()
+	local total, count = 0, 0
+	for unitID in pairs(workers) do
+		local unitDefID = spGetUnitDefID(unitID)
+		local buildSpeed = unitDefID and UnitDefs[unitDefID].buildSpeed
+		if buildSpeed and buildSpeed > 0 then
+			total = total + buildSpeed
+			count = count + 1
+		end
+	end
+	return (count > 0) and (total / count) or DEFAULT_BUILD_POWER
+end
+
 local function UpdateWorkers(share)
-	local jobs = CollectJobs(share)
+	local jobs = CollectJobs(share, AverageBuildPower())
 	local frame = spGetGameFrame()
 	for unitID in pairs(workers) do
 		if CheckWorker(unitID, share, frame) then
