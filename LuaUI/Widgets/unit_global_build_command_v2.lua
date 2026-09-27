@@ -58,6 +58,7 @@ end
 
 include("keysym.lua")
 VFS.Include("LuaRules/Configs/customcmds.h.lua")
+VFS.Include("LuaRules/Configs/constants.lua") -- HIDDEN_STORAGE
 
 local spGetMouseState     = Spring.GetMouseState
 local spTraceScreenRay    = Spring.TraceScreenRay
@@ -89,6 +90,7 @@ local spGetPlayerList     = Spring.GetPlayerList
 local spGetPlayerInfo     = Spring.GetPlayerInfo
 local spGetMyAllyTeamID   = Spring.GetMyAllyTeamID
 local spAreTeamsAllied    = Spring.AreTeamsAllied
+local spGetTeamResources  = Spring.GetTeamResources
 
 local CMD_REPAIR    = CMD.REPAIR
 local CMD_RECLAIM   = CMD.RECLAIM
@@ -193,6 +195,7 @@ options_order = {
 	'targetFinishTime', 'minPreferred', 'maxPreferred', 'areaPreferred',
 	'shortHandedBonus', 'overStaffedCost',
 	'largeMinMetal', 'completionWeight', 'completionMinProgress',
+	'highMetalFrom', 'repairHighMetalCost',
 	'lowPriorityCost', 'highPriorityDiscount',
 }
 options = {
@@ -262,6 +265,14 @@ options = {
 		type = 'number', min = 0, max = 1, step = 0.05, value = 0.5,
 		path = COSTS_PATH,
 	},
+	highMetalFrom = {
+		name = 'High metal: from (share of storage)',
+		desc = 'Metal counts as high from this share of your metal storage (0 to 1), rising to fully high when storage is full.',
+		type = 'number', min = 0, max = 1, step = 0.05, value = 0.5,
+		path = COSTS_PATH,
+	},
+	repairHighMetalCost = CostOption('Repair cost when metal is high',
+		'Added to repair jobs, scaled by how high metal is. Repair costs energy but no metal, so when metal is piling up, build power is better spent building.', 20),
 	lowPriorityCost = CostOption('Low priority job cost',
 		'Added to jobs marked low priority.', 15),
 	highPriorityDiscount = CostOption('High priority job discount',
@@ -396,6 +407,9 @@ end
 --   - completion: large projects get cheaper the closer they are to finished,
 --     and their over-staffed cost fades with progress, so a nearly finished
 --     superweapon draws in every worker for whom it's the cheapest job.
+--   - high metal: repair jobs cost more the fuller metal storage is, since
+--     repair spends energy but no metal - piling-up metal is better turned
+--     into buildings.
 --   - priority: low priority jobs cost more, and jobs the player marked high
 --     priority less. GBC never marks anything high itself.
 --   - switching: a worker already on a job only moves to another one if it's
@@ -619,6 +633,29 @@ local function JobCommand(job)
 	return job.cmd
 end
 
+-- How high the managed team's metal is, from 0 (at or below the high metal
+-- threshold) to 1 (storage full). Set each update.
+local metalHigh = 0
+
+local function UpdateMetalHigh()
+	metalHigh = 0
+	local current, storage = spGetTeamResources(managedTeamID, "metal")
+	if not current then
+		return
+	end
+	storage = storage - (HIDDEN_STORAGE or 0)
+	if storage <= 0 then
+		return
+	end
+	local from = options.highMetalFrom.value
+	local fullness = math.min(1, current / storage)
+	if from >= 1 then
+		metalHigh = (fullness >= 1) and 1 or 0
+	elseif fullness > from then
+		metalHigh = (fullness - from) / (1 - from)
+	end
+end
+
 local function JobCost(wx, wz, speed, buildDistance, job, currentKey)
 	local dx, dz = wx - job.x, wz - job.z
 	local distance = math.sqrt(dx*dx + dz*dz) - buildDistance - (job.r or 0)
@@ -647,6 +684,12 @@ local function JobCost(wx, wz, speed, buildDistance, job, currentKey)
 
 	if nearlyDone then
 		cost = cost - options.completionWeight.value * job.progress
+	end
+
+	-- Repair jobs, not repair used to help build an unfinished building (that
+	-- does spend metal).
+	if job.cmd == CMD_REPAIR then
+		cost = cost + options.repairHighMetalCost.value * metalHigh
 	end
 
 	if job.priority == 0 then
@@ -737,6 +780,7 @@ local function AverageBuildPower()
 end
 
 local function UpdateWorkers(share)
+	UpdateMetalHigh()
 	local jobs = CollectJobs(share, AverageBuildPower())
 	local frame = spGetGameFrame()
 	for unitID in pairs(workers) do
