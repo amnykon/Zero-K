@@ -214,7 +214,7 @@ options_order = {
 	'allyJobCost', 'waitingBonusPerMinute', 'waitingBonusMax', 'commanderTravelFactor',
 	'metalNeedBonus', 'energyNeedBonus', 'productionNeedBonus',
 	'assistFactories', 'econShare', 'splitWeight', 'factoryAssistPreferred', 'steerPriority',
-	'dangerRadius', 'dangerPerEnemy', 'dangerMax', 'defenceNearEnemyBonus',
+	'dangerRadius', 'dangerPerMetal', 'dangerMax', 'dangerAllyMultiplier', 'dangerDefenceMultiplier', 'dangerRadarDotMetal',
 	'autoCaretakers', 'autoCaretakersIdleFactories', 'maxCaretakersPerFactory',
 	'lowPriorityCost', 'highPriorityDiscount',
 }
@@ -360,16 +360,36 @@ options = {
 	},
 	dangerRadius = {
 		name = 'Danger radius (elmos)',
-		desc = 'Armed enemy units (and unidentified radar dots) within this distance of a job make it dangerous.',
+		desc = 'Units within this distance of a job count towards its danger.',
 		type = 'number', min = 100, max = 2000, step = 50, value = 600,
 		path = COSTS_PATH,
 	},
-	dangerPerEnemy = CostOption('Danger cost per enemy',
-		'Added to a job for each armed enemy near it, up to the maximum. Not for defences.', 10),
+	dangerPerMetal = {
+		name = 'Danger cost per metal (seconds)',
+		desc = 'A job\'s danger, in metal, is: armed enemy units\' metal, each scaled from 1 at the job down to 0 at the danger radius; minus allied armed units\' metal times the ally multiplier; minus allied defences\' metal times the defence multiplier (a defence job counts itself); and never below 0. This converts it to seconds of cost.',
+		type = 'number', min = 0, max = 1, step = 0.01, value = 0.1,
+		path = COSTS_PATH,
+	},
 	dangerMax = CostOption('Danger cost: maximum',
 		'The most danger can add to a job\'s cost.', 60, 300),
-	defenceNearEnemyBonus = CostOption('Defence near enemies bonus',
-		'Taken off building a defence (an armed building, other than a large project) when enemies are near it, instead of the danger cost - that\'s where it\'s needed.', 10),
+	dangerAllyMultiplier = {
+		name = 'Danger: ally unit multiplier',
+		desc = 'How much each metal of allied armed units near a job offsets enemy danger. Unarmed and unfinished units don\'t count.',
+		type = 'number', min = 0, max = 5, step = 0.1, value = 1,
+		path = COSTS_PATH,
+	},
+	dangerDefenceMultiplier = {
+		name = 'Danger: defence multiplier',
+		desc = 'How much each metal of allied defences (armed buildings) near a job offsets enemy danger. A defence job counts its own metal too, since building it makes the spot safer.',
+		type = 'number', min = 0, max = 5, step = 0.1, value = 1,
+		path = COSTS_PATH,
+	},
+	dangerRadarDotMetal = {
+		name = 'Danger: unidentified radar dot (metal)',
+		desc = 'How much metal an enemy radar dot counts as, when its type isn\'t known.',
+		type = 'number', min = 0, max = 1000, step = 10, value = 100,
+		path = COSTS_PATH,
+	},
 	autoCaretakers = {
 		name = 'Auto-build caretakers',
 		desc = 'While metal is high (see High metal), queue caretakers beside your producing factories, up to a number per factory. They are ordinary GBC jobs: shown, and removable like any other.',
@@ -539,8 +559,9 @@ end
 --   - resource need: mexes get cheaper the lower metal is, energy the lower
 --     energy is, and caretakers, factories and helping factories the higher
 --     metal is (not enough build power to spend it).
---   - danger: jobs with armed enemies near them cost more - except
---     defences, which get cheaper there, since that's where they're needed.
+--   - danger: armed enemies' metal near a job (scaled down with distance),
+--     less allied armed units' and defences' metal (a defence job counts
+--     itself), never below 0, converted to seconds.
 --   - economy vs units: workers can also help (guard) our producing
 --     factories. Economy jobs (mexes, energy, storage, pylons) get cheaper
 --     and helping factories dearer while economy is behind its share of build
@@ -712,30 +733,49 @@ local function BuildCategory(unitDef)
 	return nil, storage or (cp.pylonrange ~= nil)
 end
 
+local function IsArmed(unitDef)
+	return unitDef.weapons and #unitDef.weapons > 0
+end
+
 -- Whether a building is a defence: armed, and not a large project (so not a
 -- superweapon).
 local function IsDefence(unitDef)
-	return unitDef and unitDef.isImmobile and unitDef.weapons and #unitDef.weapons > 0
+	return unitDef and unitDef.isImmobile and IsArmed(unitDef)
 		and (unitDef.metalCost or 0) < options.largeMinMetal.value
 end
 
--- How many armed enemies (or unidentified radar dots) are near a spot.
-local function DangerAt(x, z)
-	local units = spGetUnitsInCylinder(x, z, options.dangerRadius.value)
-	local count = 0
+-- A spot's danger, in metal (see the dangerPerMetal option): armed enemies'
+-- metal scaled down with distance, less allied armed units' and defences'
+-- metal, never below 0. ownDefenceMetal is a defence job's own metal.
+local function DangerAt(x, z, ownDefenceMetal)
+	local radius = options.dangerRadius.value
+	local units = spGetUnitsInCylinder(x, z, radius)
+	local enemy, allied, defence = 0, 0, ownDefenceMetal or 0
 	if units then
 		for i = 1, #units do
 			local unitID = units[i]
+			local unitDefID = spGetUnitDefID(unitID)
+			local ud = unitDefID and UnitDefs[unitDefID]
 			if not spIsUnitAllied(unitID) then
-				local unitDefID = spGetUnitDefID(unitID)
-				local ud = unitDefID and UnitDefs[unitDefID]
-				if not ud or (ud.weapons and #ud.weapons > 0) then
-					count = count + 1
+				if not ud then
+					enemy = enemy + options.dangerRadarDotMetal.value
+				elseif IsArmed(ud) and not IsNanoframe(unitID) then
+					local ux, _, uz = spGetUnitPosition(unitID)
+					local falloff = ux and math.max(0, 1 - math.sqrt(DistanceSq(x, z, ux, uz)) / radius) or 1
+					enemy = enemy + (ud.metalCost or 0) * falloff
+				end
+			elseif ud and IsArmed(ud) and not IsNanoframe(unitID) then
+				if ud.isImmobile then
+					defence = defence + (ud.metalCost or 0)
+				else
+					allied = allied + (ud.metalCost or 0)
 				end
 			end
 		end
 	end
-	return count
+	return math.max(0, enemy
+		- allied * options.dangerAllyMultiplier.value
+		- defence * options.dangerDefenceMultiplier.value)
 end
 
 -- How many workers a job wants: enough workers of average build power to
@@ -809,8 +849,7 @@ local function CollectJobs(share, avgBuildPower, frame)
 						waitingBonus = waitingBonus,
 						produces = produces,
 						econ = econ,
-						defence = cmd < 0 and IsDefence(unitDef),
-						danger = DangerAt(x, z),
+						danger = DangerAt(x, z, (cmd < 0 and IsDefence(unitDef)) and unitDef.metalCost or 0),
 						key = key, owner = owner, jobId = jobId, cmd = cmd,
 						x = x, y = share.GetY(owner, jobId), z = z,
 						h = share.GetH(owner, jobId), r = share.GetR(owner, jobId),
@@ -1052,11 +1091,7 @@ local function JobCost(wx, wz, speed, buildDistance, job, currentKey, travelFact
 	end
 
 	if job.danger > 0 then
-		if job.defence then
-			cost = cost - options.defenceNearEnemyBonus.value
-		else
-			cost = cost + math.min(options.dangerMax.value, job.danger * options.dangerPerEnemy.value)
-		end
+		cost = cost + math.min(options.dangerMax.value, job.danger * options.dangerPerMetal.value)
 	end
 
 	if job.econ then
