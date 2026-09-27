@@ -133,6 +133,10 @@ local CONSTRUCTOR_ORDER = 1
 local COMMANDER_ORDER = 2
 local FACTORY_ORDER = 3
 local LAUNCH_ORDER = 4
+local GBC_ORDER = 1.5 -- right after the idle constructor button
+
+local GBC_BUTTON_ID = "gbc"
+local GBC_ICON = LUAUI_DIRNAME .. 'Images/commands/Bold/build.png'
 
 local CONSTRUCTOR_BUTTON_ID = "cons"
 local LAUNCH_BUTTON_ID = "launch"
@@ -226,7 +230,7 @@ local defaultFacHotkeys = {
 }
 
 options_path = 'Settings/HUD Panels/Quick Selection Bar'
-options_order = {  'showCoreSelector', 'vertical', 'buttonSizeLong', 'buttonFontScale', 'background_opacity', 'allowclickthrough', 'highlightidleconsinc', 'highlightidleconsincopacity', 'monitoridlecomms','monitoridlenano', 'monitorInbuiltCons', 'hideMissileSilos', 'showLaunchButton', 'leftMouseCenter', 'lblSelectionIdle', 'selectprecbomber', 'selectidlecon', 'selectidlecon_all', 'lblSelection', 'selectcomm', 'horPaddingLeft', 'horPaddingRight', 'vertPadding', 'buttonSpacing', 'minButtonSpaces', 'specSpaceOverride', 'fancySkinning', 'leftsideofscreen'}
+options_order = {  'showCoreSelector', 'vertical', 'buttonSizeLong', 'buttonFontScale', 'background_opacity', 'allowclickthrough', 'highlightidleconsinc', 'highlightidleconsincopacity', 'monitoridlecomms','monitoridlenano', 'monitorInbuiltCons', 'hideMissileSilos', 'showLaunchButton', 'showGBCButton', 'leftMouseCenter', 'lblSelectionIdle', 'selectprecbomber', 'selectidlecon', 'selectidlecon_all', 'lblSelection', 'selectcomm', 'horPaddingLeft', 'horPaddingRight', 'vertPadding', 'buttonSpacing', 'minButtonSpaces', 'specSpaceOverride', 'fancySkinning', 'leftsideofscreen'}
 options = {
 	showCoreSelector = {
 		name = 'Selection Bar Visibility',
@@ -343,6 +347,18 @@ options = {
 		noHotkey = true,
 		-- Toggling off should remove an existing button at once (it otherwise only
 		-- self-removes when the last missile is gone); rebuild to apply immediately.
+		OnChange = function()
+			if buttonList then
+				ClearData()
+			end
+		end,
+	},
+	showGBCButton = {
+		name = 'Show Global Build Command button',
+		desc = 'Show a button that toggles Global Build Command mode (same as its hotkey), highlighted while the mode is on, with the number of jobs you have queued.',
+		type = 'bool',
+		value = true,
+		noHotkey = true,
 		OnChange = function()
 			if buttonList then
 				ClearData()
@@ -580,10 +596,17 @@ local function SelectPrecBomber()
 	Spring.SelectUnitArray(toBeSelected)
 end
 
+-- A constructor Global Build Command's worker AI is managing isn't idle in the
+-- sense the idle constructor button means - it's waiting for a GBC job.
+local function IsGBCWorker(unitID)
+	local gbc = WG.GlobalBuildCommand
+	return gbc and gbc.IsControllingUnit and gbc.IsControllingUnit(unitID)
+end
+
 local function SelectIdleCon_all()
 	local consToSelect = {}
 	for uid in pairs(idleCons) do
-		if uid and uid ~= "count" then
+		if uid and uid ~= "count" and not IsGBCWorker(uid) then
 			if IsConNotCarriedByEnemyTransport(uid) then
 				consToSelect[ConvertConIDToTransportIdCarryingItIfNeeded(uid)] = true
 			end
@@ -606,7 +629,7 @@ local function SelectIdleCon()
 		local muid = nil
 
 		for uid, v in pairs(idleCons) do
-			if uid ~= "count" then
+			if uid ~= "count" and not IsGBCWorker(uid) then
 				uid = ConvertConIDToTransportIdCarryingItIfNeeded(uid)
 				if (not Spring.IsUnitSelected(uid)) then
 					local x,_,z = spGetUnitPosition(uid)
@@ -627,7 +650,7 @@ local function SelectIdleCon()
 			conIndex = (conIndex % idleConCount) + 1
 			local i = 1
 			for uid, v in pairs(idleCons) do
-				if uid ~= "count" then
+				if uid ~= "count" and not IsGBCWorker(uid) then
 					if i == conIndex then
 						uid = ConvertConIDToTransportIdCarryingItIfNeeded(uid)
 						Spring.SelectUnit(uid)
@@ -1493,8 +1516,9 @@ local function GetConstructorButton(parent)
 		local total = 0
 		for unitID in pairs(idleCons) do
 			local transportID = fromConIDToCarryingTransportID[unitID]
-			-- only count idle constructors that aren't being carried by busy transports
-			if not (transportID and (not idleTransports[transportID])) then
+			-- only count idle constructors that aren't being carried by busy
+			-- transports, or managed by Global Build Command
+			if not (transportID and (not idleTransports[transportID])) and not IsGBCWorker(unitID) then
 				total = total + 1
 			end
 		end
@@ -1772,6 +1796,88 @@ local function GetLaunchButton(parent)
 	end
 
 	function externalFunctions.UpdateHotkey()
+	end
+
+	function externalFunctions.Destroy()
+		button.Destroy()
+		button = nil
+	end
+
+	externalFunctions.UpdateButton(0)
+	return externalFunctions
+end
+
+-------------------------------------------------------------------------------
+-------------------------------------------------------------------------------
+-- Global Build Command button
+--
+-- Toggles GBC mode (unit_global_build_command.lua), same as its hotkey, and
+-- is highlighted while the mode is on, like the launch button while the
+-- launcher is open. The bottom label is how many jobs we have queued. Present
+-- while that widget is enabled; removes itself (UpdateButton returns false)
+-- when it isn't.
+
+local function GetGBCButton(parent)
+	local function OnClick(mouse)
+		local gbc = WG.GlobalBuildCommandV2
+		if gbc then
+			gbc.Toggle()
+		end
+	end
+
+	local button = GetNewButton(parent, OnClick, GBC_ORDER, 0, BUTTON_COLOR, GBC_ICON)
+	local buttonControl = button.GetButtonControl()
+	local defaultFocusColor = buttonControl.focusColor
+
+	local externalFunctions = {
+		SetPosition = button.SetPosition,
+		MoveUp = button.MoveUp,
+		MoveDown = button.MoveDown,
+		GetOrder = button.GetOrder,
+		UpdatePosition = button.UpdatePosition,
+		SetImageVisible = button.SetImageVisible,
+		UpdateFontSize = button.UpdateFontSize,
+	}
+
+	local lastActive, lastJobCount, lastHotkey
+
+	-- Cheap enough to run every frame, so the highlight follows the hotkey
+	-- without waiting for the throttled button update.
+	function externalFunctions.UpdateHighlight()
+		local gbc = WG.GlobalBuildCommandV2
+		local active = (gbc and gbc.IsActive()) or false
+		if active ~= lastActive then
+			lastActive = active
+			buttonControl.focusColor = active and LAUNCH_SELECTED_COLOR or defaultFocusColor
+			button.SetBackgroundColor(active and LAUNCH_SELECTED_COLOR or BUTTON_COLOR)
+		end
+	end
+
+	function externalFunctions.UpdateButton(dt)
+		local gbc = WG.GlobalBuildCommandV2
+		if not (gbc and options.showGBCButton.value) then
+			return false
+		end
+
+		externalFunctions.UpdateHighlight()
+
+		local jobCount = gbc.GetJobCount()
+		local hotkey = gbc.GetHotkey()
+		if jobCount ~= lastJobCount or hotkey ~= lastHotkey then
+			lastJobCount = jobCount
+			lastHotkey = hotkey
+			button.SetBottomLabel((jobCount > 0) and tostring(jobCount) or "")
+			button.SetHotkey(hotkey)
+			button.SetTooltip("Global Build Command mode" .. ((hotkey ~= "") and (" (" .. hotkey .. ")") or "") ..
+				"\nWhile on, build, repair and reclaim orders are queued as GBC jobs instead of given to the selected units." ..
+				"\nQueued jobs: " .. jobCount ..
+				"\n\255\0\255\0" .. WG.Translate("interface", "lmb") .. ": toggle\008")
+		end
+		return true
+	end
+
+	function externalFunctions.UpdateHotkey()
+		lastHotkey = nil -- picked up on the next UpdateButton
 	end
 
 	function externalFunctions.Destroy()
@@ -2329,6 +2435,16 @@ function widget:Update(dt)
 		buttonList.GetButton(CONSTRUCTOR_BUTTON_ID).UpdateButton(dt)
 		wantUpdateCons = false
 		--debugIdleConsState()
+	end
+
+	-- Add the GBC button whenever GBC v2 is enabled; it removes itself when not.
+	if options.showGBCButton.value and WG.GlobalBuildCommandV2 then
+		local gbcButton = buttonList.GetButton(GBC_BUTTON_ID)
+		if gbcButton then
+			gbcButton.UpdateHighlight()
+		else
+			buttonList.AddButton(GBC_BUTTON_ID, GetGBCButton(buttonHolder))
+		end
 	end
 
 	-- Add the launch button as soon as there are missiles to launch, every frame

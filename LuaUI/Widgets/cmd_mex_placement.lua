@@ -703,7 +703,21 @@ local function HandleAreaMex(cmdID, cx, cy, cz, cr, cmdOpts, singleSpot)
 			local builders = SpotBuilders(x, z)
 
 			-- check if some other widget wants to handle the command before sending it to units.
-			if not WG.GlobalBuildCommand or not WG.GlobalBuildCommand.CommandNotifyMex(-mexDefID, {x, y, z, 0}, cmdOpts, true) then
+			-- Global Build Command takes the mex with what's wanted of its
+			-- terraform (bury it, or wall it), and works out the terraform
+			-- itself, with the same limits as MakeMexTerraform.
+			local terra
+			if terraMode then
+				local groundY = Spring.GetGroundHeight(x, z)
+				if burryMode then
+					if groundY >= 0 then
+						terra = {elevation = math.max(groundY - wallHeight, 0)}
+					end
+				elseif groundY >= -25 then
+					terra = {wall = wallHeight}
+				end
+			end
+			if not WG.GlobalBuildCommand or not WG.GlobalBuildCommand.CommandNotifyMex(-mexDefID, {x, y, z, 0}, cmdOpts, true, terra) then
 				if terraMode and burryMode then
 					local params = MakeMexTerraform(builders, x, z, -wallHeight, true)
 					if params then

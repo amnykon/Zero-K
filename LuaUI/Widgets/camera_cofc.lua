@@ -526,7 +526,7 @@ Complete Overhead/Free Camera has six actions:
 		name = "Toggle map overview",
 		desc = "Go to overview mode, then restore view to cursor position.",
 		type = 'button',
-		hotkey = {key='tab', mod=''},
+		hotkey = {key='tab', mod='ctrl+'}, -- plain Tab is Global Build Command v2's toggle; Ctrl+Tab matches the engine's own toggleoverview, which COFC unbinds while active
 		OnChange = function(self) OverviewAction() end,
 		path=miscPath,
 	},
