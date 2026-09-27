@@ -5,16 +5,12 @@
 --  brief:   Shows the local player's own Global Build Command queue, allied
 --           players' queues, and (for spectators) everyone's queue.
 --
---  Unlike "Global Build Command" itself, this widget is on by default: it only
---  displays information, and never touches anyone's units. GBC itself no
---  longer draws its own queue - this widget replaces that display for the
---  local player too, not just for allies/spectators.
---
---  Note: This widget currently has nothing to display, because nothing calls
---  WG.GlobalBuildQueueShare.Update()/Delete() yet. That hookup into
---  unit_global_build_command.lua (or any other queue-like widget) is a
---  separate, later change. This file only implements the share/receive/draw
---  side of the feature, plus its public API.
+--  This widget is the job store for Global Build Command v2
+--  (unit_global_build_command_v2.lua): GBC v2 writes jobs through
+--  WG.GlobalBuildQueueShare.Update()/Delete(), and this widget holds them,
+--  shares them with allies and spectators, and draws them. GBC v2 doesn't
+--  draw its own queue - this widget draws it for the local player too, not
+--  just for allies/spectators. It never touches anyone's units itself.
 --
 --  Job identity is assigned by this widget, not the caller: Update() derives
 --  a jobId from the job's own content (BuildJobHash) and returns it. Two
@@ -28,7 +24,7 @@
 function widget:GetInfo()
 	return {
 		name      = "Global Build Queue",
-		desc      = "Shows your own Global Build Command queue, allied players' queues, and (for spectators) every player's queue. Nothing to see yet unless something calls the Update/Delete API.",
+		desc      = "Shows your own Global Build Command queue, allied players' queues, and (for spectators) every player's queue. Job store for Global Build Command v2.",
 		author    = "amnykon",
 		date      = "September 25, 2026",
 		license   = "GNU GPL, v2 or later",
@@ -724,7 +720,7 @@ local function BuildJobHash(job)
 	end
 end
 
--- To be called (later, from unit_global_build_command.lua or similar)
+-- To be called (from unit_global_build_command_v2.lua or similar)
 -- whenever it adds a job or changes one it already has. `job` must have the
 -- fields documented in the network protocol comment above (id, x, y, z, and
 -- the optional h/r/target/reach/priority/unitID). Returns the jobId (see
