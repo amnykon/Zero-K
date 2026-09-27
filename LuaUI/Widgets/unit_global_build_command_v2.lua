@@ -8,7 +8,9 @@
 --           instead of being handed to the selected units, so you can keep
 --           an army selected and still queue jobs for your constructors.
 --           Constructors join or leave GBC with the Global Build state
---           button (on by default). No worker allocation yet.
+--           button (on by default), and the worker AI assigns them to your
+--           and your allies' jobs by cost (see the Worker AI section;
+--           costs are under Settings/Unit Behaviour/Worker AI/Costs).
 --
 --  Usage:
 --    Tab (default; rebind under Hotkeys/Construction)
@@ -73,6 +75,20 @@ local spGetSelectedUnits  = Spring.GetSelectedUnits
 local spGetUnitTeam       = Spring.GetUnitTeam
 local spGetUnitRulesParam = Spring.GetUnitRulesParam
 local spGetUnitCmdDescs   = Spring.GetUnitCmdDescs
+local spGiveOrderToUnit   = Spring.GiveOrderToUnit
+local spGetUnitCurrentCommand = Spring.GetUnitCurrentCommand
+local spFindUnitCmdDesc   = Spring.FindUnitCmdDesc
+local spGetUnitHealth     = Spring.GetUnitHealth
+local spGetUnitIsDead     = Spring.GetUnitIsDead
+local spGetUnitIsStunned  = Spring.GetUnitIsStunned
+local spValidUnitID       = Spring.ValidUnitID
+local spValidFeatureID    = Spring.ValidFeatureID
+local spTestBuildOrder    = Spring.TestBuildOrder
+local spGetGameFrame      = Spring.GetGameFrame
+local spGetPlayerList     = Spring.GetPlayerList
+local spGetPlayerInfo     = Spring.GetPlayerInfo
+local spGetMyAllyTeamID   = Spring.GetMyAllyTeamID
+local spAreTeamsAllied    = Spring.AreTeamsAllied
 
 local CMD_REPAIR    = CMD.REPAIR
 local CMD_RECLAIM   = CMD.RECLAIM
@@ -110,6 +126,21 @@ local managedTeamID = nil
 -- is the worker AI's concern and gets its own tables later.
 local workers = {}
 
+-- Worker AI assignments (see the Worker AI section). assignment[unitID] is the
+-- key ("<ownerPlayerID>#<jobId>") of the job the worker is on, assignedCmd the
+-- command we gave it for it and assignedFrame when, so we can tell when the
+-- player (or anything else) gives it other orders.
+local assignment = {}
+local assignedCmd = {}
+local assignedFrame = {}
+-- ourCount[key] = how many of our workers are on that job, as reported to the
+-- job store with Assist().
+local ourCount = {}
+-- failedUntil[unitID][key] = game frame until which that worker won't retry a
+-- job it went idle on without finishing (eg. couldn't reach it).
+local failedUntil = {}
+local Unassign -- defined in the Worker AI section
+
 --------------------------------------------------------------------------------
 -- Helpers
 --------------------------------------------------------------------------------
@@ -137,9 +168,106 @@ end
 -- Options
 --------------------------------------------------------------------------------
 
+-- Assigning workers to jobs: released by the workerAI option, defined in the
+-- Worker AI section below.
+local ReleaseAllWorkers
+
+local COSTS_PATH = 'Settings/Unit Behaviour/Worker AI/Costs'
+
+-- A cost setting, in seconds - see the Worker AI section for how costs work.
+local function CostOption(name, desc, value, maxValue)
+	return {
+		name = name,
+		desc = desc,
+		type = 'number',
+		min = 0, max = maxValue or 60, step = 0.5,
+		value = value,
+		path = COSTS_PATH,
+	}
+end
+
 options_path = 'Settings/Unit Behaviour/Worker AI'
-options_order = {'toggle'}
+options_order = {
+	'toggle', 'workerAI', 'updateRate',
+	'switchCost',
+	'smallMaxMetal', 'largeMinMetal',
+	'smallFree', 'smallPerWorker', 'mediumFree', 'mediumPerWorker', 'largeFree', 'largePerWorker',
+	'completionWeight', 'completionMinProgress',
+	'lowPriorityCost', 'highPriorityDiscount',
+}
 options = {
+	workerAI = {
+		name = 'GBC Worker AI',
+		desc = 'Assign GBC workers (constructors with Global Build on) to queued GBC jobs, yours and your allies\'.',
+		type = 'bool',
+		value = true,
+		noHotkey = true,
+		OnChange = function(self)
+			if not self.value and ReleaseAllWorkers then
+				ReleaseAllWorkers()
+			end
+		end,
+	},
+	updateRate = {
+		name = 'Worker AI update interval (seconds)',
+		desc = 'How often idle and GBC workers are (re)assigned. Lower reacts faster but costs more CPU.',
+		type = 'number',
+		min = 0.25, max = 5, step = 0.25,
+		value = 1,
+	},
+
+	-- Costs, all in seconds. A worker takes the job with the lowest cost: its
+	-- travel time to the job plus these kickers.
+	switchCost = CostOption('Switch cost',
+		'Extra cost of pulling a worker off the job it is on: it only switches if another job is cheaper by more than this.', 5),
+	smallMaxMetal = {
+		name = 'Small project: up to (metal)',
+		desc = 'Jobs costing up to this much metal are small projects. Area, reclaim and resurrect jobs count as small.',
+		type = 'number', min = 0, max = 2000, step = 10, value = 200,
+		path = COSTS_PATH,
+	},
+	largeMinMetal = {
+		name = 'Large project: from (metal)',
+		desc = 'Jobs costing at least this much metal are large projects. Between the two is medium.',
+		type = 'number', min = 0, max = 10000, step = 50, value = 1000,
+		path = COSTS_PATH,
+	},
+	smallFree = {
+		name = 'Small project: free workers',
+		desc = 'How many workers can be on a small project before each extra one costs more.',
+		type = 'number', min = 0, max = 20, step = 1, value = 1,
+		path = COSTS_PATH,
+	},
+	smallPerWorker = CostOption('Small project: cost per extra worker',
+		'Added for each worker beyond the free ones already on a small project.', 10),
+	mediumFree = {
+		name = 'Medium project: free workers',
+		desc = 'How many workers can be on a medium project before each extra one costs more.',
+		type = 'number', min = 0, max = 20, step = 1, value = 2,
+		path = COSTS_PATH,
+	},
+	mediumPerWorker = CostOption('Medium project: cost per extra worker',
+		'Added for each worker beyond the free ones already on a medium project.', 5),
+	largeFree = {
+		name = 'Large project: free workers',
+		desc = 'How many workers can be on a large project before each extra one costs more.',
+		type = 'number', min = 0, max = 40, step = 1, value = 4,
+		path = COSTS_PATH,
+	},
+	largePerWorker = CostOption('Large project: cost per extra worker',
+		'Added for each worker beyond the free ones already on a large project.', 2),
+	completionWeight = CostOption('Large project: completion bonus',
+		'Taken off a large project\'s cost, scaled by its build progress, so nearly finished ones pull workers in to finish them.', 20),
+	completionMinProgress = {
+		name = 'Large project: completion bonus from',
+		desc = 'Build progress (0 to 1) a large project needs before the completion bonus applies.',
+		type = 'number', min = 0, max = 1, step = 0.05, value = 0.5,
+		path = COSTS_PATH,
+	},
+	lowPriorityCost = CostOption('Low priority job cost',
+		'Added to jobs marked low priority.', 15),
+	highPriorityDiscount = CostOption('High priority job discount',
+		'Taken off jobs the player marked high priority.', 30, 120),
 	toggle = {
 		name = 'Toggle GBC Mode',
 		desc = 'While on, build/repair/reclaim/resurrect orders are queued as Global Build Command jobs instead of being given to the selected units.',
@@ -194,6 +322,9 @@ local function UpdateManagedTeam(force)
 		return
 	end
 	managedTeamID = teamID
+	for unitID in pairs(assignment) do
+		Unassign(unitID)
+	end
 	workers = {}
 	if not managedTeamID then
 		return
@@ -214,6 +345,10 @@ local function SetGlobalBuildState(state)
 		local unitID = selectedUnits[i]
 		if IsOurBuilder(unitID) then
 			workers[unitID] = (state == 1) or nil
+			if state ~= 1 then
+				-- Stop managing it, but leave whatever it's doing alone.
+				Unassign(unitID)
+			end
 		end
 	end
 end
@@ -246,6 +381,387 @@ end
 --------------------------------------------------------------------------------
 -- Callins
 --------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+-- Worker AI
+--------------------------------------------------------------------------------
+-- Every updateRate seconds, each GBC worker that is idle or on a GBC job picks
+-- the job with the lowest cost, from our own and our allies' queues in the job
+-- store. Costs are in seconds:
+--   - travel time: distance to the job, less the worker's build range (and an
+--     area job's radius), divided by the worker's speed.
+--   - crowding: each project size (small/medium/large, by metal cost) lets a
+--     number of workers on for free, and each one beyond that adds a cost.
+--   - completion: large projects get cheaper the closer they are to finished.
+--   - priority: low priority jobs cost more, and jobs the player marked high
+--     priority less. GBC never marks anything high itself.
+--   - switching: a worker already on a job only moves to another one if it's
+--     cheaper by more than the switch cost.
+-- A worker the player (or anything else) gives other orders is left alone
+-- until it's idle again. Switching a worker off (Global Build state) only
+-- stops GBC managing it; it isn't stopped.
+--
+-- Not yet: pathing (a job across water from a land worker looks reachable
+-- until the worker gives up on it), and the resource-need kickers.
+
+-- Frames after giving an order during which the worker's current command
+-- isn't checked yet, since the order takes a moment to arrive.
+local ORDER_GRACE_FRAMES = 60
+-- How long a worker leaves a job alone after going idle on it without
+-- finishing it.
+local FAILED_RETRY_FRAMES = 30 * 30
+-- How close (elmos) a new unit has to be to a build job's spot to be its unit.
+local LINK_DISTANCE = 24
+
+local function IsNanoframe(unitID)
+	local _, _, beingBuilt = spGetUnitIsStunned(unitID)
+	return beingBuilt
+end
+
+local function SplitKey(key)
+	local owner, jobId = key:match("^(%d+)#(.+)$")
+	return tonumber(owner), jobId
+end
+
+-- Reports how many of our workers are on a job to the job store.
+local function SetOurCount(key, count)
+	if count < 0 then
+		count = 0
+	end
+	ourCount[key] = (count > 0) and count or nil
+	local share = WG.GlobalBuildQueueShare
+	if share then
+		local owner, jobId = SplitKey(key)
+		share.Assist(owner, jobId, count)
+	end
+end
+
+Unassign = function(unitID)
+	local key = assignment[unitID]
+	if not key then
+		return
+	end
+	assignment[unitID] = nil
+	assignedCmd[unitID] = nil
+	assignedFrame[unitID] = nil
+	SetOurCount(key, (ourCount[key] or 1) - 1)
+end
+
+ReleaseAllWorkers = function()
+	for unitID in pairs(assignment) do
+		Unassign(unitID)
+	end
+end
+
+-- Rewrites one of our own jobs with a new unitID (the unit being built for
+-- it, or nil), keeping its other fields - Update() derives the same jobId.
+local function SetOwnJobUnitID(share, jobId, unitID)
+	local me = spGetMyPlayerID()
+	share.Update({
+		id = share.GetCmdId(me, jobId),
+		x = share.GetX(me, jobId), y = share.GetY(me, jobId), z = share.GetZ(me, jobId),
+		h = share.GetH(me, jobId), r = share.GetR(me, jobId),
+		target = share.GetTarget(me, jobId),
+		reach = share.GetReach(me, jobId),
+		priority = share.GetPriority(me, jobId),
+		unitID = unitID,
+	})
+end
+
+-- A new unit (anyone's on our side) that sits on one of our build jobs'
+-- spots, of the right type, is that job's unit.
+local function LinkNewUnit(unitID, unitDefID)
+	local share = WG.GlobalBuildQueueShare
+	if not share then
+		return
+	end
+	local me = spGetMyPlayerID()
+	local ux, _, uz = spGetUnitPosition(unitID)
+	if not ux then
+		return
+	end
+	local jobIds = share.GetJobIds(me)
+	for i = 1, #jobIds do
+		local jobId = jobIds[i]
+		if share.GetCmdId(me, jobId) == -unitDefID and not share.GetUnitID(me, jobId) then
+			local jx, jz = share.GetX(me, jobId), share.GetZ(me, jobId)
+			if math.abs(jx - ux) <= LINK_DISTANCE and math.abs(jz - uz) <= LINK_DISTANCE then
+				SetOwnJobUnitID(share, jobId, unitID)
+				return
+			end
+		end
+	end
+end
+
+-- Removes our own jobs that are done or can't be done any more: build jobs
+-- whose spot is blocked (including by the finished building), and
+-- single-target jobs whose target is gone (or, for repair, fully repaired).
+-- Finished build jobs are removed in UnitFinished.
+local function CleanOwnJobs(share)
+	local me = spGetMyPlayerID()
+	local jobIds = share.GetJobIds(me)
+	for i = 1, #jobIds do
+		local jobId = jobIds[i]
+		local cmd = share.GetCmdId(me, jobId)
+		local target = share.GetTarget(me, jobId)
+		local done = false
+		if cmd < 0 then
+			if not share.GetUnitID(me, jobId) then
+				done = spTestBuildOrder(-cmd, share.GetX(me, jobId), share.GetY(me, jobId), share.GetZ(me, jobId), share.GetH(me, jobId) or 0) == 0
+			end
+		elseif target then
+			if target >= Game.maxUnits then
+				done = not spValidFeatureID(target - Game.maxUnits)
+			elseif not spValidUnitID(target) or spGetUnitIsDead(target) then
+				done = true
+			elseif cmd == CMD_REPAIR then
+				local health, maxHealth, _, _, buildProgress = spGetUnitHealth(target)
+				done = health and health >= maxHealth and (buildProgress or 1) >= 1
+			end
+		end
+		if done then
+			share.Delete(jobId)
+		end
+	end
+end
+
+local function JobSize(cmd, target)
+	local metal
+	if cmd < 0 then
+		metal = UnitDefs[-cmd].metalCost
+	elseif cmd == CMD_REPAIR and target and target < Game.maxUnits then
+		local unitDefID = spGetUnitDefID(target)
+		metal = unitDefID and UnitDefs[unitDefID].metalCost
+	end
+	if not metal then
+		return "small" -- area, reclaim and resurrect jobs
+	end
+	if metal >= options.largeMinMetal.value then
+		return "large"
+	elseif metal > options.smallMaxMetal.value then
+		return "medium"
+	end
+	return "small"
+end
+
+-- Every job in our own and our allies' queues that can still be worked on,
+-- with what the cost needs precomputed once per update.
+local function CollectJobs(share)
+	local jobs = {}
+	local myAllyTeamID = spGetMyAllyTeamID()
+	local players = spGetPlayerList()
+	for i = 1, #players do
+		local owner = players[i]
+		local _, _, isSpec, _, allyTeamID = spGetPlayerInfo(owner, false)
+		if isSpec == false and allyTeamID == myAllyTeamID then
+			local jobIds = share.GetJobIds(owner)
+			for j = 1, #jobIds do
+				local jobId = jobIds[j]
+				local cmd = share.GetCmdId(owner, jobId)
+				local target = share.GetTarget(owner, jobId)
+				local x, z = share.GetX(owner, jobId), share.GetZ(owner, jobId)
+				local valid = true
+				if target then
+					if target >= Game.maxUnits then
+						valid = spValidFeatureID(target - Game.maxUnits)
+					elseif spValidUnitID(target) and not spGetUnitIsDead(target) then
+						local ux, _, uz = spGetUnitPosition(target) -- units move
+						if ux then
+							x, z = ux, uz
+						end
+					else
+						valid = false
+					end
+				end
+				if valid and cmd and x then
+					local key = owner .. "#" .. jobId
+					local unitID = share.GetUnitID(owner, jobId)
+					local progress
+					if unitID and spValidUnitID(unitID) then
+						local _, _, _, _, buildProgress = spGetUnitHealth(unitID)
+						progress = buildProgress
+					else
+						unitID = nil
+					end
+					jobs[#jobs+1] = {
+						key = key, owner = owner, jobId = jobId, cmd = cmd,
+						x = x, y = share.GetY(owner, jobId), z = z,
+						h = share.GetH(owner, jobId), r = share.GetR(owner, jobId),
+						target = target, unitID = unitID, progress = progress,
+						size = JobSize(cmd, target),
+						priority = share.GetPriority(owner, jobId),
+						-- Other players' workers on it; ours are added from ourCount,
+						-- which changes as this update assigns workers.
+						others = share.GetWorkerCount(owner, jobId) - (ourCount[key] or 0),
+					}
+				end
+			end
+		end
+	end
+	return jobs
+end
+
+-- The command a worker needs for a job: a build job whose unit has started is
+-- helped with repair (which also works on an ally's unit).
+local function JobCommand(job)
+	if job.cmd < 0 and job.unitID then
+		return CMD_REPAIR
+	end
+	return job.cmd
+end
+
+local function JobCost(wx, wz, speed, buildDistance, job, currentKey)
+	local dx, dz = wx - job.x, wz - job.z
+	local distance = math.sqrt(dx*dx + dz*dz) - buildDistance - (job.r or 0)
+	local cost = math.max(0, distance) / speed
+
+	local size = job.size
+	local crowd = job.others + (ourCount[job.key] or 0)
+	if currentKey == job.key then
+		crowd = crowd - 1 -- not counting ourselves
+	end
+	local free = options[size .. "Free"].value
+	if crowd >= free then
+		cost = cost + (crowd - free + 1) * options[size .. "PerWorker"].value
+	end
+
+	if size == "large" and job.progress and job.progress >= options.completionMinProgress.value then
+		cost = cost - options.completionWeight.value * job.progress
+	end
+
+	if job.priority == 0 then
+		cost = cost + options.lowPriorityCost.value
+	elseif job.priority == 1 then
+		cost = cost - options.highPriorityDiscount.value
+	end
+	return cost
+end
+
+local function Assign(unitID, job, frame)
+	local oldKey = assignment[unitID]
+	if oldKey then
+		SetOurCount(oldKey, (ourCount[oldKey] or 1) - 1)
+	end
+	local cmd = JobCommand(job)
+	local params
+	if cmd == CMD_REPAIR and job.cmd < 0 then
+		params = {job.unitID}
+	elseif cmd < 0 then
+		params = {job.x, job.y or spGetGroundHeight(job.x, job.z), job.z, job.h or 0}
+	elseif job.target then
+		params = {job.target}
+	else
+		params = {job.x, job.y or spGetGroundHeight(job.x, job.z), job.z, job.r or 0}
+	end
+	spGiveOrderToUnit(unitID, cmd, params, 0)
+	assignment[unitID] = job.key
+	assignedCmd[unitID] = cmd
+	assignedFrame[unitID] = frame
+	SetOurCount(job.key, (ourCount[job.key] or 0) + 1)
+end
+
+-- Whether a worker can take a job this update. Also notices a worker on a
+-- job going idle (done, or gave up) or being given other orders.
+local function CheckWorker(unitID, share, frame)
+	if IsNanoframe(unitID) then
+		return false
+	end
+	local key = assignment[unitID]
+	if not key then
+		return spGetUnitCurrentCommand(unitID) == nil -- idle, not under someone else's orders
+	end
+	if frame < assignedFrame[unitID] + ORDER_GRACE_FRAMES then
+		return true -- our order may not have arrived yet
+	end
+	local cmd = spGetUnitCurrentCommand(unitID)
+	if cmd == assignedCmd[unitID] then
+		return true
+	end
+	if cmd then
+		Unassign(unitID) -- given other orders
+		return false
+	end
+
+	-- Went idle on the job. If the job is still there, the worker couldn't do
+	-- it - except an area job of ours, which it goes idle on once the area has
+	-- nothing left to do, so that job is done once the last of our workers on
+	-- it goes idle (others may still be finishing their part of the area).
+	local owner, jobId = SplitKey(key)
+	local jobCmd = share.GetCmdId(owner, jobId)
+	if jobCmd then
+		local isOwnAreaJob = owner == spGetMyPlayerID() and jobCmd >= 0 and not share.GetTarget(owner, jobId)
+		if isOwnAreaJob and (ourCount[key] or 0) <= 1 then
+			share.Delete(jobId)
+		else
+			failedUntil[unitID] = failedUntil[unitID] or {}
+			failedUntil[unitID][key] = frame + FAILED_RETRY_FRAMES
+		end
+	end
+	Unassign(unitID)
+	return true
+end
+
+local function UpdateWorkers(share)
+	local jobs = CollectJobs(share)
+	local frame = spGetGameFrame()
+	for unitID in pairs(workers) do
+		if CheckWorker(unitID, share, frame) then
+			local unitDefID = spGetUnitDefID(unitID)
+			local ud = unitDefID and UnitDefs[unitDefID]
+			local wx, _, wz = spGetUnitPosition(unitID)
+			if ud and wx and ud.speed > 0 then
+				local speed = ud.speed * (spGetUnitRulesParam(unitID, "totalStaticMoveSpeedChange") or 1)
+				local currentKey = assignment[unitID]
+				local failed = failedUntil[unitID]
+				local best, bestCost, currentCost
+				for j = 1, #jobs do
+					local job = jobs[j]
+					if not (failed and failed[job.key] and failed[job.key] > frame)
+							and spFindUnitCmdDesc(unitID, JobCommand(job)) then
+						local cost = JobCost(wx, wz, speed, ud.buildDistance, job, currentKey)
+						if job.key == currentKey then
+							currentCost = cost
+						end
+						if not bestCost or cost < bestCost then
+							best, bestCost = job, cost
+						end
+					end
+				end
+
+				if currentKey and not currentCost then
+					-- Its job is gone (done, or removed): move on, or stop.
+					if best then
+						Assign(unitID, best, frame)
+					else
+						Unassign(unitID)
+						spGiveOrderToUnit(unitID, CMD.STOP, {}, 0)
+					end
+				elseif best and best.key ~= currentKey
+						and (not currentCost or bestCost + options.switchCost.value < currentCost) then
+					Assign(unitID, best, frame)
+				end
+			end
+		end
+	end
+end
+
+local updateTimer = 0
+function widget:Update(dt)
+	updateTimer = updateTimer + dt
+	if updateTimer < options.updateRate.value then
+		return
+	end
+	updateTimer = 0
+	local share = WG.GlobalBuildQueueShare
+	if not share or spGetSpectatingState() then
+		return
+	end
+	-- Our own jobs are ours to keep tidy even when we don't lead the team.
+	CleanOwnJobs(share)
+	if managedTeamID and options.workerAI.value then
+		UpdateWorkers(share)
+	end
+end
 
 -- While GBC mode is on, offers every command our GBC workers could carry out
 -- - their build options and repair/reclaim/resurrect - whatever is selected,
@@ -506,6 +1022,20 @@ function widget:UnitCreated(unitID, unitDefID, unitTeam)
 	if managedTeamID and unitTeam == managedTeamID then
 		AddBuilder(unitID, unitDefID)
 	end
+	if not spGetSpectatingState() and spAreTeamsAllied(unitTeam, spGetMyTeamID()) then
+		LinkNewUnit(unitID, unitDefID)
+	end
+end
+
+function widget:UnitFinished(unitID, unitDefID, unitTeam)
+	local share = WG.GlobalBuildQueueShare
+	if not share then
+		return
+	end
+	local owner, jobId = share.GetJobByUnitID(unitID)
+	if owner and owner == spGetMyPlayerID() then
+		share.Delete(jobId)
+	end
 end
 
 function widget:UnitDestroyed(unitID, unitDefID, unitTeam)
@@ -517,7 +1047,27 @@ function widget:UnitDestroyed(unitID, unitDefID, unitTeam)
 	if morphedTo and unitTeam == managedTeamID and IsMobileBuilder(unitDefID) and not workers[unitID] then
 		workers[morphedTo] = nil
 	end
+	-- The morphed unit carries on with the old one's orders, so its job too.
+	if morphedTo and assignment[unitID] and workers[morphedTo] then
+		assignment[morphedTo] = assignment[unitID]
+		assignedCmd[morphedTo] = assignedCmd[unitID]
+		assignedFrame[morphedTo] = assignedFrame[unitID]
+		assignment[unitID] = nil
+	end
+	Unassign(unitID)
+	failedUntil[unitID] = nil
 	workers[unitID] = nil
+
+	-- A build job's unfinished unit was destroyed: the job goes back to
+	-- needing building from scratch. (A finished one's job was removed in
+	-- UnitFinished.)
+	local share = WG.GlobalBuildQueueShare
+	if share then
+		local owner, jobId = share.GetJobByUnitID(unitID)
+		if owner and owner == spGetMyPlayerID() then
+			SetOwnJobUnitID(share, jobId, nil)
+		end
+	end
 end
 
 function widget:UnitGiven(unitID, unitDefID, newTeam, oldTeam)
@@ -528,6 +1078,7 @@ end
 
 function widget:UnitTaken(unitID, unitDefID, oldTeam, newTeam)
 	if oldTeam == managedTeamID and newTeam ~= managedTeamID then
+		Unassign(unitID)
 		workers[unitID] = nil
 	end
 end
