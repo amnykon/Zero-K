@@ -31,8 +31,9 @@
 --
 --  Orders are taken in CommandNotify, so only orders that go through the
 --  engine's normal command path are seen - plus mex and area mex placement,
---  which cmd_mex_placement.lua offers to WG.GlobalBuildCommand first. Lasso
---  terraform gives its orders straight to units, and isn't queued.
+--  and terraform (lasso terraform, building on raised or lowered ground),
+--  which those widgets offer to WG.GlobalBuildCommand first. Terraform
+--  becomes repair jobs on the terraform gadget's "terraunits".
 --
 --  Job identity is derived by Update() itself from the job's own content
 --  (see gui_global_build_queue_ally.lua's BuildJobHash) - this widget never
@@ -155,6 +156,36 @@ local RestoreAllPriorities -- defined in the Worker AI section
 
 -- Our factories (the managed team's), for the economy/units split.
 local factories = {}
+
+-- Terraform. Terraform orders are carried out by repairing "terraunits",
+-- markers the terraform gadget (unit_terraform.lua) creates on the ground and
+-- removes once done. While GBC mode is on, GBC takes terraform orders from
+-- gui_lasso_terraform.lua and gui_persistent_build_height.lua (see
+-- WG.GlobalBuildCommand below), and our terraunits created within
+-- TERRAFORM_CAPTURE_FRAMES after become repair jobs.
+local terraunitDefID = UnitDefNames.terraunit and UnitDefNames.terraunit.id
+local TERRAFORM_CAPTURE_FRAMES = 90
+local captureTerraformUntil = -1
+-- alliedTerraunits[unitID] = {x, z}: every allied terraunit, so a build job
+-- waiting on terraform (raise-and-build) isn't taken or removed as blocked
+-- until the ground is done.
+local alliedTerraunits = {}
+
+-- Whether terraform is still going on within radius of a spot.
+local function TerraformPendingAt(x, z, radius)
+	local rSq = radius * radius
+	for _, pos in pairs(alliedTerraunits) do
+		if DistanceSq(x, z, pos[1], pos[2]) <= rSq then
+			return true
+		end
+	end
+	return false
+end
+
+-- How far from a building's centre terraform for it can be.
+local function TerraformRadius(unitDef)
+	return math.max(unitDef.xsize or 0, unitDef.zsize or 0) * 8 + 32
+end
 
 --------------------------------------------------------------------------------
 -- Helpers
@@ -685,7 +716,9 @@ local function CleanOwnJobs(share)
 		local done = false
 		if cmd < 0 then
 			if not share.GetUnitID(me, jobId) then
-				done = spTestBuildOrder(-cmd, share.GetX(me, jobId), share.GetY(me, jobId), share.GetZ(me, jobId), share.GetH(me, jobId) or 0) == 0
+				local x, z = share.GetX(me, jobId), share.GetZ(me, jobId)
+				done = spTestBuildOrder(-cmd, x, share.GetY(me, jobId), z, share.GetH(me, jobId) or 0) == 0
+					and not TerraformPendingAt(x, z, TerraformRadius(UnitDefs[-cmd]))
 			end
 		elseif target then
 			if target >= Game.maxUnits then
@@ -842,6 +875,11 @@ local function CollectJobs(share, avgBuildPower, frame)
 						valid = false
 					end
 				end
+				-- A build job waiting on terraform can't be built yet.
+				if valid and cmd and cmd < 0 and x and not share.GetUnitID(owner, jobId)
+						and TerraformPendingAt(x, z, TerraformRadius(UnitDefs[-cmd])) then
+					valid = false
+				end
 				if valid and cmd and x then
 					local key = owner .. "#" .. jobId
 					local unitID = share.GetUnitID(owner, jobId)
@@ -853,6 +891,17 @@ local function CollectJobs(share, avgBuildPower, frame)
 						unitID = nil
 					end
 					local unitDef = JobUnitDef(cmd, target)
+					local terraform = cmd == CMD_REPAIR and target and target < Game.maxUnits
+						and spGetUnitDefID(target) == terraunitDefID
+					local preferred
+					if terraform then
+						-- From the terraform gadget's own metal estimate for it.
+						local estimate = spGetUnitRulesParam(target, "terraform_estimate") or 0
+						preferred = math.max(options.minPreferred.value, math.min(options.maxPreferred.value,
+							math.ceil(estimate / (avgBuildPower * options.targetFinishTime.value))))
+					else
+						preferred = PreferredWorkers(unitDef, avgBuildPower)
+					end
 					local produces, econ
 					if cmd < 0 then
 						produces, econ = BuildCategory(unitDef)
@@ -873,7 +922,8 @@ local function CollectJobs(share, avgBuildPower, frame)
 						x = x, y = share.GetY(owner, jobId), z = z,
 						h = share.GetH(owner, jobId), r = share.GetR(owner, jobId),
 						target = target, unitID = unitID, progress = progress,
-						preferred = PreferredWorkers(unitDef, avgBuildPower),
+						preferred = preferred,
+						terraform = terraform,
 						large = unitDef and (unitDef.metalCost or 0) >= options.largeMinMetal.value,
 						priority = share.GetPriority(owner, jobId),
 						-- Other players' workers on it; ours are added from ourCount,
@@ -1091,7 +1141,9 @@ local function JobCost(wx, wz, speed, buildDistance, job, currentKey, travelFact
 
 	-- Repair jobs, not repair used to help build an unfinished building (that
 	-- does spend metal).
-	if job.cmd == CMD_REPAIR then
+	-- Terraform is carried out by repair, but spends metal like building, so
+	-- the repair resource costs don't apply to it.
+	if job.cmd == CMD_REPAIR and not job.terraform then
 		cost = cost + options.repairHighMetalCost.value * metalHigh
 			+ options.repairLowEnergyCost.value * energyLow
 	elseif job.cmd == CMD_RECLAIM then
@@ -1651,12 +1703,27 @@ local compatibility = {
 		QueueJob({id = cmdID, x = params[1], y = params[2] or spGetGroundHeight(params[1], params[3]), z = params[3], h = params[4] or 0})
 		return true
 	end,
-	-- Terraform isn't something a GBC job can hold, so it goes to the units.
-	CommandNotifyTF = function()
-		return false
+	-- Terraform (lasso terraform): while GBC mode is on, the terraform still
+	-- goes ahead (the constructor was already given CMD_TERRAFORM_INTERNAL), but
+	-- no constructors are sent to it; the terraunits it creates are captured as
+	-- repair jobs instead.
+	CommandNotifyTF = function(unitArray, shift)
+		if not (active and WG.GlobalBuildQueueShare and terraunitDefID) then
+			return false
+		end
+		captureTerraformUntil = spGetGameFrame() + TERRAFORM_CAPTURE_FRAMES
+		return true
 	end,
-	CommandNotifyRaiseAndBuild = function()
-		return false
+	-- Building on raised or lowered ground (persistent build height, lasso
+	-- terraform): the terraform is captured as above, and the building queued
+	-- as a job that waits until the terraform around it is done.
+	CommandNotifyRaiseAndBuild = function(unitArray, cmdID, x, y, z, facing, shift)
+		if not (active and WG.GlobalBuildQueueShare and terraunitDefID) then
+			return false
+		end
+		captureTerraformUntil = spGetGameFrame() + TERRAFORM_CAPTURE_FRAMES
+		QueueJob({id = cmdID, x = x, y = y, z = z, h = facing or 0})
+		return true
 	end,
 	CommandNotifyPreQue = function()
 	end,
@@ -1689,6 +1756,15 @@ end
 function widget:UnitCreated(unitID, unitDefID, unitTeam)
 	if managedTeamID and unitTeam == managedTeamID then
 		AddBuilder(unitID, unitDefID)
+	end
+	if unitDefID == terraunitDefID and terraunitDefID and spAreTeamsAllied(unitTeam, spGetMyTeamID()) then
+		local ux, uy, uz = spGetUnitPosition(unitID)
+		if ux then
+			alliedTerraunits[unitID] = {ux, uz}
+			if unitTeam == spGetMyTeamID() and spGetGameFrame() <= captureTerraformUntil and WG.GlobalBuildQueueShare then
+				QueueJob({id = CMD_REPAIR, target = unitID, x = ux, y = uy, z = uz})
+			end
+		end
 	end
 	if not spGetSpectatingState() and spAreTeamsAllied(unitTeam, spGetMyTeamID()) then
 		LinkNewUnit(unitID, unitDefID)
@@ -1726,6 +1802,7 @@ function widget:UnitDestroyed(unitID, unitDefID, unitTeam)
 	failedUntil[unitID] = nil
 	workers[unitID] = nil
 	factories[unitID] = nil
+	alliedTerraunits[unitID] = nil
 	loweredByUs[unitID] = nil
 	playerPriority[unitID] = nil
 
