@@ -88,6 +88,7 @@ local spValidFeatureID    = Spring.ValidFeatureID
 local spTestBuildOrder    = Spring.TestBuildOrder
 local spGetGameFrame      = Spring.GetGameFrame
 local spGetPlayerList     = Spring.GetPlayerList
+local spGetTeamList       = Spring.GetTeamList
 local spGetPlayerInfo     = Spring.GetPlayerInfo
 local spGetMyAllyTeamID   = Spring.GetMyAllyTeamID
 local spAreTeamsAllied    = Spring.AreTeamsAllied
@@ -670,12 +671,12 @@ local function RemoveJobsInCircle(x, z, r)
 	if not share then
 		return
 	end
-	local myPlayerID = spGetMyPlayerID()
+	local myTeamID = spGetMyTeamID()
 	local rSq = r * r
-	local jobIds = share.GetJobIds(myPlayerID)
+	local jobIds = share.GetJobIds(myTeamID)
 	for i = 1, #jobIds do
 		local jobId = jobIds[i]
-		local jx, jz = share.GetX(myPlayerID, jobId), share.GetZ(myPlayerID, jobId)
+		local jx, jz = share.GetX(myTeamID, jobId), share.GetZ(myTeamID, jobId)
 		if jx and DistanceSq(x, z, jx, jz) <= rSq then
 			share.Delete(jobId)
 		end
@@ -789,7 +790,7 @@ end
 -- Rewrites one of our own jobs with a new unitID (the unit being built for
 -- it, or nil), keeping its other fields - Update() derives the same jobId.
 local function SetOwnJobUnitID(share, jobId, unitID)
-	local me = spGetMyPlayerID()
+	local me = spGetMyTeamID()
 	share.Update({
 		id = share.GetCmdId(me, jobId),
 		x = share.GetX(me, jobId), y = share.GetY(me, jobId), z = share.GetZ(me, jobId),
@@ -810,7 +811,7 @@ local function LinkNewUnit(unitID, unitDefID)
 	if not share then
 		return
 	end
-	local me = spGetMyPlayerID()
+	local me = spGetMyTeamID()
 	local ux, _, uz = spGetUnitPosition(unitID)
 	if not ux then
 		return
@@ -833,7 +834,7 @@ end
 -- single-target jobs whose target is gone (or, for repair, fully repaired).
 -- Finished build jobs are removed in UnitFinished.
 local function CleanOwnJobs(share)
-	local me = spGetMyPlayerID()
+	local me = spGetMyTeamID()
 	local jobIds = share.GetJobIds(me)
 	for i = 1, #jobIds do
 		local jobId = jobIds[i]
@@ -991,12 +992,12 @@ local waitingSince = {}
 local function CollectJobs(share, avgBuildPower, frame)
 	local jobs = {}
 	local stillWaiting = {}
-	local myAllyTeamID = spGetMyAllyTeamID()
-	local players = spGetPlayerList()
-	for i = 1, #players do
-		local owner = players[i]
-		local _, _, isSpec, _, allyTeamID = spGetPlayerInfo(owner, false)
-		if isSpec == false and allyTeamID == myAllyTeamID then
+	-- Every team on our side: our own (which, with commshare, holds our
+	-- teammates' jobs too) and our allies'.
+	local teams = spGetTeamList(spGetMyAllyTeamID())
+	for i = 1, #teams do
+		local owner = teams[i]
+		do
 			local jobIds = share.GetJobIds(owner)
 			for j = 1, #jobIds do
 				local jobId = jobIds[j]
@@ -1110,7 +1111,7 @@ local function CollectJobs(share, avgBuildPower, frame)
 	-- economy/units split. These aren't job store jobs; their keys start
 	-- with "f#".
 	if options.assistFactories.value then
-		local me = spGetMyPlayerID()
+		local me = spGetMyTeamID()
 		for factoryID in pairs(factories) do
 			if spGetUnitIsBuilding(factoryID) then
 				local fx, fy, fz = spGetUnitPosition(factoryID)
@@ -1348,7 +1349,9 @@ local function JobCost(wx, wz, speed, buildDistance, job, currentKey, travelFact
 		cost = cost + options.splitWeight.value * splitImbalance
 	end
 
-	if job.owner ~= spGetMyPlayerID() then
+	-- Only for another team's jobs: what our commshare teammates queue is on
+	-- our own team's list.
+	if job.owner ~= spGetMyTeamID() then
 		cost = cost + options.allyJobCost.value
 	end
 
@@ -1369,7 +1372,7 @@ local function Assign(unitID, job, frame)
 	end
 	if job.phase then
 		local issued = terraformIssued[job.key]
-		if issued and job.owner == spGetMyPlayerID() and job.terraunit then
+		if issued and job.owner == spGetMyTeamID() and job.terraunit then
 			-- Join our own terraform for it by tag.
 			spGiveOrderToUnit(unitID, CMD_LEVEL, {job.x, spGetGroundHeight(job.x, job.z), job.z, issued[1]}, 0)
 		elseif job.terraunit then
@@ -1447,7 +1450,7 @@ local function CheckWorker(unitID, share, frame)
 		return true
 	end
 	if jobCmd then
-		local isOwnAreaJob = owner == spGetMyPlayerID() and jobCmd >= 0 and not share.GetTarget(owner, jobId)
+		local isOwnAreaJob = owner == spGetMyTeamID() and jobCmd >= 0 and not share.GetTarget(owner, jobId)
 		if isOwnAreaJob and (ourCount[key] or 0) <= 1 then
 			share.Delete(jobId)
 		else
@@ -1555,7 +1558,7 @@ local FACING_DIR = {
 
 -- Our own caretaker jobs (not yet built) near a spot, and whether any is.
 local function OwnCaretakerJobsNear(share, x, z, radius)
-	local me = spGetMyPlayerID()
+	local me = spGetMyTeamID()
 	local jobIds = share.GetJobIds(me)
 	local count = 0
 	local rSq = radius * radius
@@ -1901,7 +1904,7 @@ function externalFunctions.GetJobCount()
 	if not share then
 		return 0
 	end
-	return #share.GetJobIds(spGetMyPlayerID())
+	return #share.GetJobIds(spGetMyTeamID())
 end
 
 -- The interface other widgets already use to talk to Global Build Command:
@@ -2007,7 +2010,7 @@ function widget:UnitFinished(unitID, unitDefID, unitTeam)
 		return
 	end
 	local owner, jobId = share.GetJobByUnitID(unitID)
-	if owner and owner == spGetMyPlayerID() then
+	if owner and owner == spGetMyTeamID() then
 		-- A wall still to raise around it keeps the job going.
 		local wall = share.GetWall(owner, jobId)
 		if not (wall and WallNeeded(UnitDefs[unitDefID], share.GetX(owner, jobId), share.GetZ(owner, jobId), share.GetH(owner, jobId) or 0, wall)) then
@@ -2046,7 +2049,7 @@ function widget:UnitDestroyed(unitID, unitDefID, unitTeam)
 	local share = WG.GlobalBuildQueueShare
 	if share then
 		local owner, jobId = share.GetJobByUnitID(unitID)
-		if owner and owner == spGetMyPlayerID() then
+		if owner and owner == spGetMyTeamID() then
 			SetOwnJobUnitID(share, jobId, nil)
 		end
 	end

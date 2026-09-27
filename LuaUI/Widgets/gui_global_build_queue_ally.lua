@@ -56,6 +56,8 @@ options = {
 
 -- "Localized" API calls, because they run ~33% faster in lua.
 local spGetMyPlayerID       = Spring.GetMyPlayerID
+local spGetMyTeamID         = Spring.GetMyTeamID
+local spGetPlayerList       = Spring.GetPlayerList
 local spGetPlayerInfo       = Spring.GetPlayerInfo
 local spGetMyAllyTeamID     = Spring.GetMyAllyTeamID
 local spGetSpectatingState  = Spring.GetSpectatingState
@@ -119,9 +121,9 @@ local res_color = {0.4, 0.8, 1.0, 1.0}
 -- the requester only accepts restores quoting its current nonce, so an old
 -- restore replayed during a rejoin's catch-up (see below) is ignored.
 --
--- "GBCQ|O,<ownerPlayerID>,<nonce>;<U records>" - a restore: the U records
--- that follow are ownerPlayerID's own jobs, sent back by an ally holding a
--- copy. Only ownerPlayerID applies them, and only from allies (never
+-- "GBCQ|O,<ownerTeamID>,<nonce>;<U records>" - a restore: the U records
+-- that follow are the requester's team's jobs, sent back by an ally holding a
+-- copy. Only players on that team apply them, and only from allies (never
 -- spectators, who could otherwise write into a player's own queue). It
 -- accepts restores from the first ally to answer and ignores the rest, since
 -- every ally should hold the same copy. A big queue is split over several
@@ -132,14 +134,14 @@ local res_color = {0.4, 0.8, 1.0, 1.0}
 -- forms:
 --   U,<jobId>,<cmdId>,<x>,<y>,<z>,<h>,<r>,<target>,<reach>,<priority>,<unitID>,<elevation>,<wall> -- add/update a job
 --   R,<jobId>                                                                 -- remove a job
---   A,<ownerPlayerID>,<jobId>,<workers>                                        -- report an assist count
+--   A,<ownerTeamID>,<jobId>,<workers>                                          -- report an assist count
 -- Empty optional fields (h, r, target, reach, priority, unitID, elevation,
 -- wall) are encoded as "".
 --   jobId    : a hash derived from the job's own identity-defining fields
 --              (see BuildJobHash below), computed by the owner's own widget -
---              never the caller. Unique among that one player's jobs only,
---              so always paired with an ownerPlayerID (implicit as the
---              sender for U/R, explicit for A) to address a specific job.
+--              never the caller. Unique among that one team's jobs only, so
+--              always paired with an owning teamID (implicit as the sender's
+--              team for U/R, explicit for A) to address a specific job.
 --   cmdId    : negative unitDefID for a build job, or CMD.REPAIR/RECLAIM/RESURRECT
 --   x, y, z  : world position (for build jobs, area jobs, and cached feature positions)
 --   h        : build facing (0-3), build jobs only
@@ -178,14 +180,23 @@ local res_color = {0.4, 0.8, 1.0, 1.0}
 -- A job's worker count isn't part of the job record itself - it's the sum of
 -- however many workers each interested player (the owner included) reports
 -- assigning to it via "A" records, since any ally can assist a job without
--- owning it. The sender of an "A" record is always the assisting player (the
--- same convention "U"/"R" use), so only the job's owner needs naming
+-- owning it. The sender of an "A" record is always the assisting player, so
+-- only the job's owning team needs naming
 -- explicitly; workers = 0 means that player stopped assisting. There's no
 -- ordering guarantee between a job's own "U"/"R" records and "A" records
 -- about it - SendLuaUIMsg is relayed immediately by the server, not
 -- attached to the deterministic simulation frame stream, so an assist
 -- report can arrive before the job it refers to, or after the job's been
 -- removed. Both are treated as normal, silent no-ops rather than errors.
+--
+-- Jobs belong to teams, not players. Normally each player has their own team,
+-- so it's the same thing; with commshare, several players control one team
+-- (one army), and a job any of them queues goes on that team's one list,
+-- which the team leader's GBC works through. Any trusted player on a team
+-- can add to, change and remove its jobs (U and R records apply to the
+-- sender's team). Assist counts are still per player (A records). A team's
+-- list is only cleared once no players are left on it; a player who merges
+-- into another team takes their old team's list with them.
 --
 -- Deltas alone are enough to keep everyone in sync even for a player who joins
 -- mid-game: Spring's join-in-progress catch-up replays the recorded network
@@ -206,6 +217,14 @@ local MSG_PREFIX = "GBCQ|"
 local MAX_UPDATES_PER_SEND = 50 -- caps how many changed jobs go out in one delta, so a big burst spreads over multiple sends rather than spiking that one frame's message count
 
 local myPlayerID = spGetMyPlayerID()
+-- Jobs belong to teams, not players (see "Jobs belong to teams" below).
+local myTeamID = spGetMyTeamID()
+
+-- The team a player is on, or nil.
+local function PlayerTeam(playerID)
+	local _, _, _, teamID = spGetPlayerInfo(playerID, false)
+	return teamID
+end
 
 -- Our current sync request's nonce (see the network protocol comment above),
 -- and the ally whose restore we accepted for it, so we don't mix copies.
@@ -230,14 +249,15 @@ local CATCHING_UP_FRAMES = 120
 -- dictionaries of plain numbers avoids that, at the cost of more repetitive
 -- code around them.
 
--- Every player's queue - ours included - lives in this one set of
--- dictionaries, keyed by "<playerID>#<jobId>" rather than by jobId alone,
+-- Every team's queue - ours included - lives in this one set of
+-- dictionaries, keyed by "<teamID>#<jobId>" rather than by jobId alone,
 -- since jobId is a hash of a job's own content (see BuildJobHash) and two
--- different players can independently produce the exact same one (eg. both
--- queuing the same building at the same spot) - the playerID prefix is what
--- keeps those from colliding into a single entry. Our own entries
--- (owner == myPlayerID) are written directly by UpdateJob/DeleteJob;
--- everyone else's arrive over the network via RecvLuaMsg/ApplyRecordsData.
+-- different teams can independently produce the exact same one (eg. both
+-- queuing the same building at the same spot) - the teamID prefix is what
+-- keeps those from colliding into a single entry. Our own team's entries
+-- (owner == myTeamID) are written directly by UpdateJob/DeleteJob, and by
+-- commshare teammates' records; everyone else's arrive over the network via
+-- RecvLuaMsg/ApplyRecordsData.
 local cmdId = {}
 local jobX = {}
 local jobY = {}
@@ -250,10 +270,10 @@ local jobPriority = {} -- 0=low, 1=high, or nil for medium/normal (see the netwo
 local jobUnitID = {} -- the job's actual in-world unit, or nil if none exists yet
 local jobElevation = {} -- absolute height to build a building at, or nil (see the network protocol comment above)
 local jobWall = {} -- height of a wall around a building, or nil (see the network protocol comment above)
-local jobOwner = {} -- jobOwner[key] = the owning playerID
+local jobOwner = {} -- jobOwner[key] = the owning teamID
 
 -- Reverse index of jobUnitID, for any player's job: unitIDToOwnerKey[unitID]
--- = the owning key ("<ownerPlayerID>#<jobId>"). Spring unitIDs are globally
+-- = the owning key ("<ownerTeamID>#<jobId>"). Spring unitIDs are globally
 -- unique (not per-team), so one flat table works for every player's jobs at
 -- once - GetJobByUnitID() below is the only reader, SetJobUnitID() the only
 -- writer, kept in sync with jobUnitID wherever it changes.
@@ -277,7 +297,7 @@ local jobWorkersTotal = {}
 -- directly by the public API (see the bottom of this file) rather than by
 -- comparing against a second full copy of our own data every send tick - the
 -- caller already knows exactly when something changed, so there's nothing to
--- diff. Keyed by bare jobId, not "<playerID>#<jobId>", since it only ever
+-- diff. Keyed by bare jobId, not "<teamID>#<jobId>", since it only ever
 -- tracks our own changes.
 local pendingStatus = {}
 
@@ -312,8 +332,8 @@ local function EncodeRemove(jobId)
 	return "R," .. jobId .. ";"
 end
 
-local function EncodeAssist(ownerPlayerID, jobId, workers)
-	return "A," .. ownerPlayerID .. "," .. jobId .. "," .. floor(workers or 0) .. ";"
+local function EncodeAssist(ownerTeamID, jobId, workers)
+	return "A," .. ownerTeamID .. "," .. jobId .. "," .. floor(workers or 0) .. ";"
 end
 
 -- Splits a record into its op char and everything after the first comma,
@@ -343,11 +363,11 @@ local function DecodeUpsert(rest)
 end
 
 local function DecodeAssist(rest)
-	local ownerPlayerID, jobId, workers = rest:match("^(%d+),([^,]+),(%d+)$")
-	if not ownerPlayerID then
+	local ownerTeamID, jobId, workers = rest:match("^(%d+),([^,]+),(%d+)$")
+	if not ownerTeamID then
 		return nil
 	end
-	return tonumber(ownerPlayerID), jobId, tonumber(workers)
+	return tonumber(ownerTeamID), jobId, tonumber(workers)
 end
 
 --------------------------------------------------------------------------------
@@ -365,7 +385,7 @@ end
 -- Reads back one of our own jobs by its bare jobId, deriving the storage key
 -- the same way UpdateJob does.
 local function EncodeLocalUpsert(jobId)
-	local key = myPlayerID .. "#" .. jobId
+	local key = myTeamID .. "#" .. jobId
 	return EncodeUpsert(jobId, cmdId[key], jobX[key], jobY[key], jobZ[key],
 		jobH[key], jobR[key], jobTarget[key], jobReach[key], jobPriority[key], jobUnitID[key],
 		jobElevation[key], jobWall[key])
@@ -374,8 +394,8 @@ end
 -- Reads back our own current assist contribution to ownerKey, deriving the
 -- assist storage key the same way SetAssist does.
 local function EncodeLocalAssist(ownerKey)
-	local ownerPlayerID, jobId = ownerKey:match("^(%d+)#(.+)$")
-	return EncodeAssist(ownerPlayerID, jobId, assistWorkers[ownerKey .. "#" .. myPlayerID])
+	local ownerTeamID, jobId = ownerKey:match("^(%d+)#(.+)$")
+	return EncodeAssist(ownerTeamID, jobId, assistWorkers[ownerKey .. "#" .. myPlayerID])
 end
 
 -- Marks every jobId we currently own as pending an update, in response to a
@@ -384,9 +404,9 @@ end
 -- someone actually asks for it - never on the much more frequent
 -- BroadcastPending() path below, which only ever touches pendingStatus.
 local function MarkAllOwnJobsPending()
-	local myKeyPrefix = myPlayerID .. "#"
+	local myKeyPrefix = myTeamID .. "#"
 	for key, owner in pairs(jobOwner) do
-		if owner == myPlayerID then
+		if owner == myTeamID then
 			pendingStatus[key:sub(#myKeyPrefix + 1)] = true
 		end
 	end
@@ -440,15 +460,19 @@ local function BroadcastPending()
 	SendBatch(records)
 end
 
--- Answers a sync request by sending requesterID back its own jobs, as we
--- hold them - see the "O" message in the network protocol comment. Sends
+-- Answers a sync request by sending requesterID back their team's jobs, as
+-- we hold them - see the "O" message in the network protocol comment. Sends
 -- nothing if we hold none. Split into messages of MAX_UPDATES_PER_SEND jobs.
 local function SendRestore(requesterID, nonce)
-	local header = "O," .. requesterID .. "," .. nonce .. ";"
-	local prefix = requesterID .. "#"
+	local requesterTeam = PlayerTeam(requesterID)
+	if not requesterTeam then
+		return
+	end
+	local header = "O," .. requesterTeam .. "," .. nonce .. ";"
+	local prefix = requesterTeam .. "#"
 	local records = {header}
 	for key, owner in pairs(jobOwner) do
-		if owner == requesterID then
+		if owner == requesterTeam then
 			local jobId = key:sub(#prefix + 1)
 			records[#records+1] = EncodeUpsert(jobId, cmdId[key], jobX[key], jobY[key], jobZ[key],
 				jobH[key], jobR[key], jobTarget[key], jobReach[key], jobPriority[key], jobUnitID[key],
@@ -502,7 +526,7 @@ local function SetJobUnitID(key, unitID)
 	end
 end
 
--- Clears one job by its full storage key ("<playerID>#<jobId>"), whether
+-- Clears one job by its full storage key ("<teamID>#<jobId>"), whether
 -- it's ours or another player's - shared by DeleteJob() and the receiving
 -- code below. Also drops every assist contribution to it (ours and anyone
 -- else's) and its worker total, since none of that means anything once the
@@ -546,8 +570,8 @@ end
 -- addressed to us, for our current sync request, and from the first ally to
 -- answer it.
 local function AcceptRestore(playerID, rest)
-	local ownerPlayerID, nonce = rest:match("^(%d+),(%d+)$")
-	if tonumber(ownerPlayerID) ~= myPlayerID or not syncNonce or nonce ~= syncNonce then
+	local ownerTeamID, nonce = rest:match("^(%d+),(%d+)$")
+	if tonumber(ownerTeamID) ~= myTeamID or not syncNonce or nonce ~= syncNonce then
 		return false
 	end
 	if restoreFrom and restoreFrom ~= playerID then
@@ -558,10 +582,13 @@ local function AcceptRestore(playerID, rest)
 end
 
 local function ApplyRecordsData(playerID, data)
-	-- Whose jobs "U" records are: the sender's, unless an "O" restore header
-	-- says they're our own being sent back. restoring stays false for a
-	-- restore we're not accepting, and skips the rest of the message.
-	local ownerID = playerID
+	-- Whose jobs "U" records are: the sender's team's, unless an "O" restore
+	-- header says they're our own team's being sent back.
+	local senderTeam = PlayerTeam(playerID)
+	if not senderTeam then
+		return
+	end
+	local ownerID = senderTeam
 	local restoring = false
 	local first = true
 	for record in data:gmatch("([^;]+);") do
@@ -571,7 +598,7 @@ local function ApplyRecordsData(playerID, data)
 				return -- not ours, or not the first record: drop the message
 			end
 			restoring = true
-			ownerID = myPlayerID
+			ownerID = myTeamID
 		elseif op == "U" then
 			local jobId, decodedCmdId, x, y, z, h, r, target, reach, priority, unitID, elevation, wall = DecodeUpsert(rest)
 			-- A restore never overwrites a job we already have again locally.
@@ -594,11 +621,11 @@ local function ApplyRecordsData(playerID, data)
 		elseif restoring then
 			-- A restore only carries "U" records.
 		elseif op == "R" then
-			ClearJob(playerID .. "#" .. rest)
+			ClearJob(senderTeam .. "#" .. rest)
 		elseif op == "A" then
-			local ownerPlayerID, jobId, workers = DecodeAssist(rest)
-			if ownerPlayerID then
-				SetAssist(ownerPlayerID .. "#" .. jobId, playerID, workers)
+			local ownerTeamID, jobId, workers = DecodeAssist(rest)
+			if ownerTeamID then
+				SetAssist(ownerTeamID .. "#" .. jobId, playerID, workers)
 			end
 		end
 		first = false
@@ -636,16 +663,42 @@ end
 -- spectator), not after some guessed number of quiet seconds. This also means
 -- a player who simply hasn't changed their queue in a while is never
 -- mistaken for one who's gone.
-local function ClearPlayerJobs(playerID)
+-- Whether any player (other than exceptPlayerID) is still on a team.
+local function TeamHasPlayers(teamID, exceptPlayerID)
+	local players = spGetPlayerList(teamID, true)
+	if players then
+		for i = 1, #players do
+			local playerID = players[i]
+			if playerID ~= exceptPlayerID then
+				local _, _, isSpec, playerTeam = spGetPlayerInfo(playerID, false)
+				if isSpec == false and playerTeam == teamID then
+					return true
+				end
+			end
+		end
+	end
+	return false
+end
+
+-- Clears the lists of teams nobody is on any more.
+local function ClearAbandonedTeams(exceptPlayerID)
+	local checked = {}
 	for key, owner in pairs(jobOwner) do
-		if owner == playerID then
+		if checked[owner] == nil then
+			checked[owner] = TeamHasPlayers(owner, exceptPlayerID)
+		end
+		if not checked[owner] then
 			ClearJob(key)
 		end
 	end
+end
 
-	-- Also drop whatever this player was assisting, even jobs they didn't own
-	-- themselves - ClearJob() above only cleared assist entries for jobs
-	-- *they* owned, not their contributions to everyone else's.
+local function ClearPlayerJobs(playerID)
+	ClearAbandonedTeams(playerID)
+
+	-- Drop whatever this player was assisting - ClearJob() only clears
+	-- assist entries for jobs it clears, not their contributions to jobs
+	-- that remain.
 	local suffix = "#" .. playerID
 	for assistKey, workers in pairs(assistWorkers) do
 		if assistKey:sub(-#suffix) == suffix then
@@ -661,10 +714,48 @@ function widget:PlayerRemoved(playerID)
 	ClearPlayerJobs(playerID)
 end
 
+-- We joined another team (a commshare merge, or unmerge): our old team's
+-- list moves with us, unless someone is still on the old team to keep it.
+local function MoveOwnJobs(oldTeamID, newTeamID)
+	if TeamHasPlayers(oldTeamID, myPlayerID) then
+		return
+	end
+	local prefix = oldTeamID .. "#"
+	for key, owner in pairs(jobOwner) do
+		if owner == oldTeamID then
+			local jobId = key:sub(#prefix + 1)
+			local newKey = newTeamID .. "#" .. jobId
+			if not jobOwner[newKey] then
+				cmdId[newKey] = cmdId[key]
+				jobX[newKey], jobY[newKey], jobZ[newKey] = jobX[key], jobY[key], jobZ[key]
+				jobH[newKey], jobR[newKey], jobTarget[newKey] = jobH[key], jobR[key], jobTarget[key]
+				jobReach[newKey], jobPriority[newKey] = jobReach[key], jobPriority[key]
+				jobElevation[newKey], jobWall[newKey] = jobElevation[key], jobWall[key]
+				jobOwner[newKey] = newTeamID
+				local unitID = jobUnitID[key]
+				SetJobUnitID(key, nil)
+				SetJobUnitID(newKey, unitID)
+				pendingStatus[jobId] = true
+			end
+			ClearJob(key)
+		end
+	end
+end
+
 function widget:PlayerChanged(playerID)
+	if playerID == myPlayerID and not spGetSpectatingState() then
+		local teamID = spGetMyTeamID()
+		if teamID ~= myTeamID then
+			local oldTeamID = myTeamID
+			myTeamID = teamID
+			MoveOwnJobs(oldTeamID, teamID)
+		end
+	end
 	local _, _, isSpec = spGetPlayerInfo(playerID, false)
 	if isSpec then
 		ClearPlayerJobs(playerID)
+	else
+		ClearAbandonedTeams()
 	end
 end
 
@@ -739,15 +830,6 @@ end
 -- creates fresh once per draw call and passes into every DrawJobGhost() this
 -- frame, so a player with many queued jobs only costs one real lookup, not
 -- one per job.
-local function GetOwnerTeamID(ownerPlayerID, cache)
-	local teamID = cache[ownerPlayerID]
-	if teamID == nil then
-		local _, _, _, t = spGetPlayerInfo(ownerPlayerID, false)
-		teamID = t or false
-		cache[ownerPlayerID] = teamID
-	end
-	return teamID or nil
-end
 
 local function DrawJobOutline(cmdId, x, y, z, h, r, target)
 	if cmdId < 0 then -- build job outline
@@ -826,9 +908,8 @@ function widget:DrawWorld()
 
 	glDepthTest(true)
 	glColor(1, 1, 1, 0.4)
-	local teamIDCache = {}
 	for key, cmdIdValue in pairs(cmdId) do
-		DrawJobGhost(cmdIdValue, jobX[key], jobY[key], jobZ[key], jobH[key], GetOwnerTeamID(jobOwner[key], teamIDCache))
+		DrawJobGhost(cmdIdValue, jobX[key], jobY[key], jobZ[key], jobH[key], jobOwner[key])
 	end
 	glDepthTest(false)
 
@@ -881,7 +962,10 @@ end
 -- the removal of the Lua table entry.
 local function UpdateJob(job)
 	local jobId = BuildJobHash(job)
-	local key = myPlayerID .. "#" .. jobId
+	if spGetSpectatingState() then
+		return jobId -- spectators have no list of their own
+	end
+	local key = myTeamID .. "#" .. jobId
 	cmdId[key] = job.id
 	jobX[key] = job.x
 	jobY[key] = job.y
@@ -894,7 +978,7 @@ local function UpdateJob(job)
 	jobElevation[key] = job.elevation
 	jobWall[key] = job.wall
 	SetJobUnitID(key, job.unitID)
-	jobOwner[key] = myPlayerID
+	jobOwner[key] = myTeamID
 	pendingStatus[jobId] = true
 	return jobId
 end
@@ -903,7 +987,7 @@ end
 -- `buildQueue[hash] = nil` becomes `WG.GlobalBuildQueueShare.Delete(jobId)`,
 -- using whatever jobId the matching Update() call returned.
 local function DeleteJob(jobId)
-	ClearJob(myPlayerID .. "#" .. jobId)
+	ClearJob(myTeamID .. "#" .. jobId)
 	pendingStatus[jobId] = false
 end
 
@@ -914,8 +998,8 @@ end
 -- Update()/Delete(), the job's owner has to be named explicitly, since we're
 -- reporting our own contribution to a job we don't necessarily own.
 -- workers = 0 (or nil) means we've stopped assisting it.
-local function AssistJob(ownerPlayerID, jobId, workers)
-	local ownerKey = ownerPlayerID .. "#" .. jobId
+local function AssistJob(ownerTeamID, jobId, workers)
+	local ownerKey = ownerTeamID .. "#" .. jobId
 	SetAssist(ownerKey, myPlayerID, workers)
 	pendingAssist[ownerKey] = true
 end
@@ -925,90 +1009,90 @@ end
 -- read access into any player's queue, including its own - the same way
 -- GetWorkerCount()/GetReach()/GetPriority()/GetUnitID() below expose the
 -- rest of a job's data.
-local function GetCmdId(ownerPlayerID, jobId)
-	return cmdId[ownerPlayerID .. "#" .. jobId]
+local function GetCmdId(ownerTeamID, jobId)
+	return cmdId[ownerTeamID .. "#" .. jobId]
 end
-local function GetX(ownerPlayerID, jobId)
-	return jobX[ownerPlayerID .. "#" .. jobId]
+local function GetX(ownerTeamID, jobId)
+	return jobX[ownerTeamID .. "#" .. jobId]
 end
-local function GetY(ownerPlayerID, jobId)
-	return jobY[ownerPlayerID .. "#" .. jobId]
+local function GetY(ownerTeamID, jobId)
+	return jobY[ownerTeamID .. "#" .. jobId]
 end
-local function GetZ(ownerPlayerID, jobId)
-	return jobZ[ownerPlayerID .. "#" .. jobId]
+local function GetZ(ownerTeamID, jobId)
+	return jobZ[ownerTeamID .. "#" .. jobId]
 end
-local function GetH(ownerPlayerID, jobId)
-	return jobH[ownerPlayerID .. "#" .. jobId]
+local function GetH(ownerTeamID, jobId)
+	return jobH[ownerTeamID .. "#" .. jobId]
 end
-local function GetR(ownerPlayerID, jobId)
-	return jobR[ownerPlayerID .. "#" .. jobId]
+local function GetR(ownerTeamID, jobId)
+	return jobR[ownerTeamID .. "#" .. jobId]
 end
-local function GetTarget(ownerPlayerID, jobId)
-	return jobTarget[ownerPlayerID .. "#" .. jobId]
+local function GetTarget(ownerTeamID, jobId)
+	return jobTarget[ownerTeamID .. "#" .. jobId]
 end
 
 -- Returns the total number of workers everyone (owner included) has
 -- currently assigned to a job, for an AI deciding what a worker should work
 -- on next. 0 if nobody's reported assisting it (or it doesn't exist).
-local function GetWorkerCount(ownerPlayerID, jobId)
-	return jobWorkersTotal[ownerPlayerID .. "#" .. jobId] or 0
+local function GetWorkerCount(ownerTeamID, jobId)
+	return jobWorkersTotal[ownerTeamID .. "#" .. jobId] or 0
 end
 
 -- Returns the reach enum value the job's owner set via Update() (see the
 -- network protocol comment above for what each value means), or nil if the
 -- job is unrestricted or doesn't exist - another factor for an AI deciding
 -- what a worker should work on next, alongside GetWorkerCount().
-local function GetReach(ownerPlayerID, jobId)
-	return jobReach[ownerPlayerID .. "#" .. jobId]
+local function GetReach(ownerTeamID, jobId)
+	return jobReach[ownerTeamID .. "#" .. jobId]
 end
 
 -- Returns the job's priority (0=low, 1=high), or nil for medium/normal - see
 -- the network protocol comment above. Purely carried data, same as reach:
 -- this widget doesn't act on it itself.
-local function GetPriority(ownerPlayerID, jobId)
-	return jobPriority[ownerPlayerID .. "#" .. jobId]
+local function GetPriority(ownerTeamID, jobId)
+	return jobPriority[ownerTeamID .. "#" .. jobId]
 end
 
 -- Returns a build job's elevation (absolute height to build the building at)
 -- and wall height, each nil if it has none - see the network protocol comment.
-local function GetElevation(ownerPlayerID, jobId)
-	return jobElevation[ownerPlayerID .. "#" .. jobId]
+local function GetElevation(ownerTeamID, jobId)
+	return jobElevation[ownerTeamID .. "#" .. jobId]
 end
-local function GetWall(ownerPlayerID, jobId)
-	return jobWall[ownerPlayerID .. "#" .. jobId]
+local function GetWall(ownerTeamID, jobId)
+	return jobWall[ownerTeamID .. "#" .. jobId]
 end
 
 -- Returns the job's actual in-world unit, or nil if none exists yet (or the
 -- job doesn't exist) - eg. to check build progress directly instead of only
 -- knowing the job's world position.
-local function GetUnitID(ownerPlayerID, jobId)
-	return jobUnitID[ownerPlayerID .. "#" .. jobId]
+local function GetUnitID(ownerTeamID, jobId)
+	return jobUnitID[ownerTeamID .. "#" .. jobId]
 end
 
 -- The reverse of GetUnitID: given a unit (any player's), returns the
--- ownerPlayerID and jobId of the job it belongs to, or nil if it isn't
+-- ownerTeamID and jobId of the job it belongs to, or nil if it isn't
 -- currently any job's unit. Doesn't require already knowing who owns it.
 local function GetJobByUnitID(unitID)
 	local ownerKey = unitIDToOwnerKey[unitID]
 	if not ownerKey then
 		return nil
 	end
-	local ownerPlayerID, jobId = ownerKey:match("^(%d+)#(.+)$")
-	return tonumber(ownerPlayerID), jobId
+	local ownerTeamID, jobId = ownerKey:match("^(%d+)#(.+)$")
+	return tonumber(ownerTeamID), jobId
 end
 
--- Returns an array of every jobId currently on file for ownerPlayerID (empty
+-- Returns an array of every jobId currently on file for ownerTeamID (empty
 -- if they have none), in no particular order. The only way to discover a
 -- job without already knowing its jobId - eg. for an AI weighing whether one
 -- of its own workers should help build something on an ally's queue, which
 -- needs to see that queue's jobs at all before it can cost any of them.
--- Every other Get* function above is a point lookup by (ownerPlayerID,
+-- Every other Get* function above is a point lookup by (ownerTeamID,
 -- jobId); this is the one enumeration this widget exposes.
-local function GetJobIds(ownerPlayerID)
-	local ownerPrefix = ownerPlayerID .. "#"
+local function GetJobIds(ownerTeamID)
+	local ownerPrefix = ownerTeamID .. "#"
 	local jobIds = {}
 	for key, owner in pairs(jobOwner) do
-		if owner == ownerPlayerID then
+		if owner == ownerTeamID then
 			jobIds[#jobIds+1] = key:sub(#ownerPrefix + 1)
 		end
 	end
@@ -1017,6 +1101,7 @@ end
 
 function widget:Initialize()
 	myPlayerID = spGetMyPlayerID()
+	myTeamID = spGetMyTeamID()
 	-- Ask everyone else to (re-)send their current queue, since we won't have
 	-- seen any of the deltas from before we existed (eg. this widget just got
 	-- enabled mid-game).
