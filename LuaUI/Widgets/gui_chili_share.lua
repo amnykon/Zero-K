@@ -129,7 +129,7 @@ options = {
 		name = 'Show Player List',
 		desc = 'Hold this button to bring up the Player List.',
 		type = 'button',
-		hotkey = "tab",
+		hotkey = "Shift+tab",
 		OnChange = function(self)
 			if window then
 				if wantRebuild and UpdateListFunction then
@@ -1558,7 +1558,9 @@ function widget:Update(dt)
 	end
 	if window and window.visible then
 		local showkey = string.lower(WG.crude.GetHotkey("epic_chili_share_menu_v1.24_sharemenu"))
-		if (Spring.GetKeyState(Spring.GetKeyCode(showkey)) ~= window.visible) then
+		showkey = showkey:match("([^+]+)$") -- the key itself, without modifiers such as "shift+"
+		local keyCode = showkey and Spring.GetKeyCode(showkey)
+		if not keyCode or (Spring.GetKeyState(keyCode) ~= window.visible) then
 			window:ToggleVisibility()
 		end
 	end
