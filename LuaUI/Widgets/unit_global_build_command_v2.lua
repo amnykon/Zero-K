@@ -20,6 +20,8 @@
 --                    snapping, area and single-target repair/reclaim.
 --    right drag    - while GBC mode is on, remove every job this widget
 --                    queued inside the circle.
+--    Global Build Cancel (command panel, only while GBC mode is on)
+--                  - area command that removes jobs the same way.
 --    escape        - cancel an in-progress right-drag.
 --    Global Build state button (constructors only; hidden in the command
 --    panel by default, see integral_menu_culling.lua)
@@ -131,6 +133,7 @@ end
 local function SetActive(on)
 	active = on
 	StopDrag()
+	Spring.ForceLayoutUpdate() -- re-run CommandsChanged, to show/hide Global Build Cancel
 	spEcho("GBC mode: " .. (active and "ON (orders are queued as GBC jobs, right-drag to remove)" or "OFF"))
 end
 
@@ -219,6 +222,21 @@ local function SetGlobalBuildState(state)
 	end
 end
 
+-- Removes every job this widget queued whose position is inside the circle.
+-- Shared by right-drag removal and the Global Build Cancel command.
+local function RemoveJobsInCircle(x, z, r)
+	if not WG.GlobalBuildQueueShare then
+		return
+	end
+	local rSq = r * r
+	for jobId, pos in pairs(myJobs) do
+		if DistanceSq(x, z, pos.x, pos.z) <= rSq then
+			WG.GlobalBuildQueueShare.Delete(jobId)
+			myJobs[jobId] = nil
+		end
+	end
+end
+
 -- Queues one job and remembers it for right-drag removal.
 local function QueueJob(job)
 	local jobId = WG.GlobalBuildQueueShare.Update(job)
@@ -231,12 +249,15 @@ end
 
 -- Adds the Global Build on/off state button when a constructor is selected,
 -- showing the state of the first selected constructor.
+--
+-- While GBC mode is on, also adds the Global Build Cancel area command,
+-- whatever is selected, so jobs can be removed with an army selected too.
 function widget:CommandsChanged()
+	local customCommands = widgetHandler.customCommands
 	local selectedUnits = spGetSelectedUnits()
 	for i = 1, #selectedUnits do
 		local unitID = selectedUnits[i]
 		if IsOurBuilder(unitID) then
-			local customCommands = widgetHandler.customCommands
 			customCommands[#customCommands+1] = {
 				id      = CMD_GLOBAL_BUILD,
 				type    = CMDTYPE.ICON_MODE,
@@ -246,14 +267,34 @@ function widget:CommandsChanged()
 				action  = 'globalbuild',
 				params  = {workers[unitID] and 1 or 0, 'off', 'on'},
 			}
-			return
+			break
 		end
+	end
+
+	if active then
+		customCommands[#customCommands+1] = {
+			id      = CMD_GBCANCEL,
+			type    = CMDTYPE.ICON_AREA,
+			tooltip = 'Cancel Global Build tasks.',
+			name    = 'Global Build Cancel',
+			cursor  = 'Repair',
+			action  = 'globalbuildcancel',
+		}
 	end
 end
 
 function widget:CommandNotify(cmdID, params, opts)
 	if cmdID == CMD_GLOBAL_BUILD then
 		SetGlobalBuildState(params[1])
+		return true
+	end
+
+	-- Handled even if GBC mode was switched off while the command was on the
+	-- cursor, so it never reaches the selected units.
+	if cmdID == CMD_GBCANCEL then
+		if #params >= 4 then
+			RemoveJobsInCircle(params[1], params[3], params[4])
+		end
 		return true
 	end
 
@@ -362,15 +403,7 @@ function widget:MouseRelease(x, y, button)
 	if not dragX then
 		return false
 	end
-	if WG.GlobalBuildQueueShare then
-		local rSq = dragR * dragR
-		for jobId, pos in pairs(myJobs) do
-			if DistanceSq(dragX, dragZ, pos.x, pos.z) <= rSq then
-				WG.GlobalBuildQueueShare.Delete(jobId)
-				myJobs[jobId] = nil
-			end
-		end
-	end
+	RemoveJobsInCircle(dragX, dragZ, dragR)
 	StopDrag()
 	return true
 end
