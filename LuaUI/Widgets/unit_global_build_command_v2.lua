@@ -64,8 +64,8 @@ local spEcho              = Spring.Echo
 local spGetMyTeamID       = Spring.GetMyTeamID
 local spGetTeamUnits      = Spring.GetTeamUnits
 local spGetUnitDefID      = Spring.GetUnitDefID
-local spGetUnitIsStunned  = Spring.GetUnitIsStunned
 local spGetSelectedUnits  = Spring.GetSelectedUnits
+local spGetUnitTeam       = Spring.GetUnitTeam
 
 local CMD_REPAIR    = CMD.REPAIR
 local CMD_RECLAIM   = CMD.RECLAIM
@@ -92,18 +92,13 @@ local dragX, dragZ, dragR -- in-progress right-drag for area removal
 
 local myTeamID = spGetMyTeamID()
 
--- GBC membership, set per constructor with the Global Build state button.
--- This is only "does GBC control this unit", not what the unit is doing -
--- worker status (idle, direct orders, working a job) is the worker AI's
--- concern and gets its own tables later.
---
--- builderInclude[unitID] = true/false for every mobile builder on our team,
--- including unfinished ones, so a nanoframe keeps its state once finished.
--- New builders start included.
-local builderInclude = {}
-
--- workers[unitID] = true for every builder that is both included and
--- finished: the set the worker AI will assign jobs to.
+-- GBC workers: workers[unitID] = true for every mobile builder on our team
+-- with the Global Build state on. A builder with it off simply isn't here.
+-- New builders start on, and join as soon as they're created, so a nanoframe
+-- switched off before it finishes stays off. Unfinished builders are in the
+-- set too - the worker AI skips units it can't order yet. This is only "does
+-- GBC control this unit"; worker status (idle, direct orders, working a job)
+-- is the worker AI's concern and gets its own tables later.
 local workers = {}
 
 --------------------------------------------------------------------------------
@@ -151,39 +146,25 @@ options = {
 -- Membership
 --------------------------------------------------------------------------------
 
-local function IsNanoframe(unitID)
-	local _, _, beingBuilt = spGetUnitIsStunned(unitID)
-	return beingBuilt
+local function IsMobileBuilder(unitDefID)
+	return unitDefID and UnitDefs[unitDefID].isMobileBuilder
 end
 
--- Recomputes whether one builder belongs in workers.
-local function RefreshWorker(unitID)
-	if builderInclude[unitID] and not IsNanoframe(unitID) then
-		workers[unitID] = true
-	else
-		workers[unitID] = nil
-	end
+-- For the state button: selected units can include ones on other teams (eg.
+-- while spectating), which GBC doesn't control.
+local function IsOurBuilder(unitID)
+	return spGetUnitTeam(unitID) == myTeamID and IsMobileBuilder(spGetUnitDefID(unitID))
 end
 
 local function AddBuilder(unitID, unitDefID)
-	if not UnitDefs[unitDefID].isMobileBuilder then
-		return
+	if IsMobileBuilder(unitDefID) then
+		workers[unitID] = true
 	end
-	if builderInclude[unitID] == nil then
-		builderInclude[unitID] = true
-	end
-	RefreshWorker(unitID)
-end
-
-local function RemoveBuilder(unitID)
-	builderInclude[unitID] = nil
-	workers[unitID] = nil
 end
 
 -- Rebuilds membership from scratch for our current team, eg. on startup or
 -- after our team changes.
 local function ScanTeam()
-	builderInclude = {}
 	workers = {}
 	local units = spGetTeamUnits(myTeamID)
 	if not units then
@@ -199,9 +180,8 @@ local function SetGlobalBuildState(state)
 	local selectedUnits = spGetSelectedUnits()
 	for i = 1, #selectedUnits do
 		local unitID = selectedUnits[i]
-		if builderInclude[unitID] ~= nil then
-			builderInclude[unitID] = (state == 1)
-			RefreshWorker(unitID)
+		if IsOurBuilder(unitID) then
+			workers[unitID] = (state == 1) or nil
 		end
 	end
 end
@@ -221,8 +201,8 @@ end
 function widget:CommandsChanged()
 	local selectedUnits = spGetSelectedUnits()
 	for i = 1, #selectedUnits do
-		local include = builderInclude[selectedUnits[i]]
-		if include ~= nil then
+		local unitID = selectedUnits[i]
+		if IsOurBuilder(unitID) then
 			local customCommands = widgetHandler.customCommands
 			customCommands[#customCommands+1] = {
 				id      = CMD_GLOBAL_BUILD,
@@ -231,7 +211,7 @@ function widget:CommandsChanged()
 				name    = 'Global Build',
 				cursor  = 'Repair',
 				action  = 'globalbuild',
-				params  = {include and 1 or 0, 'off', 'on'},
+				params  = {workers[unitID] and 1 or 0, 'off', 'on'},
 			}
 			return
 		end
@@ -298,14 +278,8 @@ function widget:UnitCreated(unitID, unitDefID, unitTeam)
 	end
 end
 
-function widget:UnitFinished(unitID, unitDefID, unitTeam)
-	if unitTeam == myTeamID and builderInclude[unitID] ~= nil then
-		RefreshWorker(unitID)
-	end
-end
-
 function widget:UnitDestroyed(unitID, unitDefID, unitTeam)
-	RemoveBuilder(unitID)
+	workers[unitID] = nil
 end
 
 function widget:UnitGiven(unitID, unitDefID, newTeam, oldTeam)
@@ -316,7 +290,7 @@ end
 
 function widget:UnitTaken(unitID, unitDefID, oldTeam, newTeam)
 	if oldTeam == myTeamID and newTeam ~= myTeamID then
-		RemoveBuilder(unitID)
+		workers[unitID] = nil
 	end
 end
 
