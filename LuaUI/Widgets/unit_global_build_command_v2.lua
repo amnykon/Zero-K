@@ -69,6 +69,7 @@ local spGetTeamUnits      = Spring.GetTeamUnits
 local spGetUnitDefID      = Spring.GetUnitDefID
 local spGetSelectedUnits  = Spring.GetSelectedUnits
 local spGetUnitTeam       = Spring.GetUnitTeam
+local spGetUnitRulesParam = Spring.GetUnitRulesParam
 
 local CMD_REPAIR    = CMD.REPAIR
 local CMD_RECLAIM   = CMD.RECLAIM
@@ -306,6 +307,14 @@ function widget:UnitCreated(unitID, unitDefID, unitTeam)
 end
 
 function widget:UnitDestroyed(unitID, unitDefID, unitTeam)
+	-- Morphing (eg. a commander upgrade) creates a new unit and then destroys
+	-- the old one, so the new unit has already joined as on through
+	-- UnitCreated. Carry over the old builder's state, so a builder switched
+	-- off stays off after it morphs.
+	local morphedTo = spGetUnitRulesParam(unitID, "wasMorphedTo")
+	if morphedTo and unitTeam == managedTeamID and IsMobileBuilder(unitDefID) and not workers[unitID] then
+		workers[morphedTo] = nil
+	end
 	workers[unitID] = nil
 end
 
