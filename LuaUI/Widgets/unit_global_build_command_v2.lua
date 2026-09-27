@@ -91,10 +91,12 @@ local spGetPlayerInfo     = Spring.GetPlayerInfo
 local spGetMyAllyTeamID   = Spring.GetMyAllyTeamID
 local spAreTeamsAllied    = Spring.AreTeamsAllied
 local spGetTeamResources  = Spring.GetTeamResources
+local spGetUnitIsBuilding = Spring.GetUnitIsBuilding
 
 local CMD_REPAIR    = CMD.REPAIR
 local CMD_RECLAIM   = CMD.RECLAIM
 local CMD_RESURRECT = CMD.RESURRECT
+local CMD_GUARD     = CMD.GUARD
 
 local sqrt  = math.sqrt
 
@@ -141,7 +143,14 @@ local ourCount = {}
 -- failedUntil[unitID][key] = game frame until which that worker won't retry a
 -- job it went idle on without finishing (eg. couldn't reach it).
 local failedUntil = {}
+-- assignedSide[unitID] = "econ" or "units" for a worker on an economy job or
+-- helping a factory, for the economy/units split.
+local assignedSide = {}
 local Unassign -- defined in the Worker AI section
+local RestoreAllPriorities -- defined in the Worker AI section
+
+-- Our factories (the managed team's), for the economy/units split.
+local factories = {}
 
 --------------------------------------------------------------------------------
 -- Helpers
@@ -199,6 +208,8 @@ options_order = {
 	'lowMetalBelow', 'reclaimHighMetalCost', 'reclaimLowMetalBonus',
 	'lowEnergyBelow', 'repairLowEnergyCost', 'resurrectLowEnergyCost',
 	'allyJobCost', 'waitingBonusPerMinute', 'waitingBonusMax', 'commanderTravelFactor',
+	'metalNeedBonus', 'energyNeedBonus', 'productionNeedBonus',
+	'assistFactories', 'econShare', 'splitWeight', 'factoryAssistPreferred', 'steerPriority',
 	'lowPriorityCost', 'highPriorityDiscount',
 }
 options = {
@@ -308,6 +319,39 @@ options = {
 		type = 'number', min = 1, max = 10, step = 0.25, value = 2,
 		path = COSTS_PATH,
 	},
+	metalNeedBonus = CostOption('Metal need bonus',
+		'Taken off building mexes, scaled by how low metal is.', 15),
+	energyNeedBonus = CostOption('Energy need bonus',
+		'Taken off building energy (solar, wind, fusion, geothermal, singularity), scaled by how low energy is.', 15),
+	productionNeedBonus = CostOption('Build power need bonus',
+		'Taken off building caretakers and factories, and off helping factories, scaled by how high metal is: metal piling up means there isn\'t enough build power to spend it.', 15),
+	assistFactories = {
+		name = 'Help factories',
+		desc = 'Let GBC workers help (guard) your factories while they are producing, as the "units" side of the economy/units split.',
+		type = 'bool',
+		value = true,
+		noHotkey = true,
+	},
+	econShare = {
+		name = 'Economy vs units: economy share',
+		desc = 'The share (0 to 1) of build power - GBC workers plus producing factories - to spend on economy (mexes, energy, storage, pylons). The rest goes to units: factories and GBC workers helping them.',
+		type = 'number', min = 0, max = 1, step = 0.05, value = 0.5,
+	},
+	splitWeight = CostOption('Economy vs units: steering strength',
+		'How strongly the economy share steers workers: economy jobs get up to this much cheaper when economy is behind its share, and helping factories this much dearer (and the other way round when units are behind).', 20),
+	factoryAssistPreferred = {
+		name = 'Preferred workers helping a factory',
+		desc = 'Preferred worker count for helping each producing factory.',
+		type = 'number', min = 1, max = 20, step = 1, value = 3,
+		path = COSTS_PATH,
+	},
+	steerPriority = {
+		name = 'Steer build priority',
+		desc = 'While metal is short, lower whichever side of the economy/units split is ahead to Low build priority: factories when units are ahead, GBC workers on economy jobs when economy is ahead. Only ever between Normal and Low, never High, and never a unit whose priority you set yourself. Units it lowered go back to Normal when no longer ahead.',
+		type = 'bool',
+		value = true,
+		noHotkey = true,
+	},
 	lowPriorityCost = CostOption('Low priority job cost',
 		'Added to jobs marked low priority.', 15),
 	highPriorityDiscount = CostOption('High priority job discount',
@@ -341,6 +385,8 @@ end
 local function AddBuilder(unitID, unitDefID)
 	if IsMobileBuilder(unitDefID) then
 		workers[unitID] = true
+	elseif unitDefID and UnitDefs[unitDefID].isFactory then
+		factories[unitID] = true
 	end
 end
 
@@ -369,7 +415,9 @@ local function UpdateManagedTeam(force)
 	for unitID in pairs(assignment) do
 		Unassign(unitID)
 	end
+	RestoreAllPriorities()
 	workers = {}
+	factories = {}
 	if not managedTeamID then
 		return
 	end
@@ -451,6 +499,16 @@ end
 --   - ally jobs cost a little more than our own.
 --   - waiting: a job gets cheaper the longer it waits with no workers on it.
 --   - commanders: their travel time counts extra, to keep them near home.
+--   - resource need: mexes get cheaper the lower metal is, energy the lower
+--     energy is, and caretakers, factories and helping factories the higher
+--     metal is (not enough build power to spend it).
+--   - economy vs units: workers can also help (guard) our producing
+--     factories. Economy jobs (mexes, energy, storage, pylons) get cheaper
+--     and helping factories dearer while economy is behind its share of build
+--     power, and the other way round while units are behind. While metal is
+--     short, whichever side is ahead is also lowered to Low build priority -
+--     only ever Normal <-> Low, never touching a unit whose priority the
+--     player set.
 --   - priority: low priority jobs cost more, and jobs the player marked high
 --     priority less. GBC never marks anything high itself.
 --   - switching: a worker already on a job only moves to another one if it's
@@ -460,7 +518,7 @@ end
 -- stops GBC managing it; it isn't stopped.
 --
 -- Not yet: pathing (a job across water from a land worker looks reachable
--- until the worker gives up on it), and the resource-need kickers.
+-- until the worker gives up on it).
 
 -- Frames after giving an order during which the worker's current command
 -- isn't checked yet, since the order takes a moment to arrive.
@@ -488,8 +546,8 @@ local function SetOurCount(key, count)
 	end
 	ourCount[key] = (count > 0) and count or nil
 	local share = WG.GlobalBuildQueueShare
-	if share then
-		local owner, jobId = SplitKey(key)
+	local owner, jobId = SplitKey(key)
+	if share and owner then -- not for helping a factory, which isn't a job store job
 		share.Assist(owner, jobId, count)
 	end
 end
@@ -502,6 +560,7 @@ Unassign = function(unitID)
 	assignment[unitID] = nil
 	assignedCmd[unitID] = nil
 	assignedFrame[unitID] = nil
+	assignedSide[unitID] = nil
 	SetOurCount(key, (ourCount[key] or 1) - 1)
 end
 
@@ -509,6 +568,7 @@ ReleaseAllWorkers = function()
 	for unitID in pairs(assignment) do
 		Unassign(unitID)
 	end
+	RestoreAllPriorities()
 end
 
 -- Rewrites one of our own jobs with a new unitID (the unit being built for
@@ -594,6 +654,25 @@ local function JobUnitDef(cmd, target)
 	end
 end
 
+-- What a building a job builds is for: "metal", "energy" or "production"
+-- (build power), or nil; and whether it's on the economy side of the
+-- economy/units split (mexes, energy, storage, pylons).
+local function BuildCategory(unitDef)
+	if not (unitDef and unitDef.isImmobile) then
+		return nil, false
+	end
+	local cp = unitDef.customParams
+	if cp.ismex then
+		return "metal", true
+	elseif (unitDef.energyMake or 0) > 0 or cp.windgen then
+		return "energy", true
+	elseif (unitDef.buildSpeed or 0) > 0 then
+		return "production", false
+	end
+	local storage = (unitDef.metalStorage or 0) > 0 or (unitDef.energyStorage or 0) > 0
+	return nil, storage or (cp.pylonrange ~= nil)
+end
+
 -- How many workers a job wants: enough workers of average build power to
 -- build it in the target finish time. From the whole build time, so it
 -- doesn't change as the job progresses.
@@ -650,6 +729,10 @@ local function CollectJobs(share, avgBuildPower, frame)
 						unitID = nil
 					end
 					local unitDef = JobUnitDef(cmd, target)
+					local produces, econ
+					if cmd < 0 then
+						produces, econ = BuildCategory(unitDef)
+					end
 					local waitingBonus = 0
 					if share.GetWorkerCount(owner, jobId) == 0 then
 						local since = waitingSince[key] or frame
@@ -659,6 +742,8 @@ local function CollectJobs(share, avgBuildPower, frame)
 					end
 					jobs[#jobs+1] = {
 						waitingBonus = waitingBonus,
+						produces = produces,
+						econ = econ,
 						key = key, owner = owner, jobId = jobId, cmd = cmd,
 						x = x, y = share.GetY(owner, jobId), z = z,
 						h = share.GetH(owner, jobId), r = share.GetR(owner, jobId),
@@ -675,6 +760,27 @@ local function CollectJobs(share, avgBuildPower, frame)
 		end
 	end
 	waitingSince = stillWaiting
+
+	-- Helping each of our producing factories, as the "units" side of the
+	-- economy/units split. These aren't job store jobs; their keys start
+	-- with "f#".
+	if options.assistFactories.value then
+		local me = spGetMyPlayerID()
+		for factoryID in pairs(factories) do
+			if spGetUnitIsBuilding(factoryID) then
+				local fx, fy, fz = spGetUnitPosition(factoryID)
+				if fx then
+					jobs[#jobs+1] = {
+						key = "f#" .. factoryID, owner = me, cmd = CMD_GUARD,
+						x = fx, y = fy, z = fz, target = factoryID,
+						preferred = options.factoryAssistPreferred.value,
+						others = 0, waitingBonus = 0,
+						factoryAssist = true,
+					}
+				end
+			end
+		end
+	end
 	return jobs
 end
 
@@ -723,6 +829,101 @@ end
 -- How high metal is, how low metal is and how low energy is, each 0 to 1.
 -- Set each update.
 local metalHigh, metalLow, energyLow = 0, 0, 0
+
+-- The economy/units split: economy share target minus the economy's actual
+-- share of build power, from -1 to 1. Positive means economy is behind (units
+-- ahead), negative that economy is ahead. Set each update.
+local splitImbalance = 0
+-- Beyond this, one side counts as ahead for steering build priority.
+local SPLIT_DEADBAND = 0.1
+
+local function BuildPower(unitID)
+	local unitDefID = spGetUnitDefID(unitID)
+	return unitDefID and UnitDefs[unitDefID].buildSpeed or 0
+end
+
+local function UpdateSplit()
+	local econ, units = 0, 0
+	for factoryID in pairs(factories) do
+		if spGetUnitIsBuilding(factoryID) then
+			units = units + BuildPower(factoryID)
+		end
+	end
+	for unitID, side in pairs(assignedSide) do
+		if side == "econ" then
+			econ = econ + BuildPower(unitID)
+		elseif side == "units" then
+			units = units + BuildPower(unitID)
+		end
+	end
+	local total = econ + units
+	splitImbalance = (total > 0) and (options.econShare.value - econ / total) or 0
+end
+
+-- Build priority steering. Only ever Normal <-> Low; loweredByUs records
+-- what we lowered, so only that is ever raised back, and playerPriority
+-- records units whose priority the player set, which are never touched.
+local PRIORITY_LOW, PRIORITY_NORMAL = 0, 1
+local loweredByUs = {}
+local playerPriority = {}
+
+local function LowerPriority(unitID)
+	if loweredByUs[unitID] or playerPriority[unitID] then
+		return
+	end
+	if (spGetUnitRulesParam(unitID, "buildpriority") or PRIORITY_NORMAL) ~= PRIORITY_NORMAL then
+		return
+	end
+	spGiveOrderToUnit(unitID, CMD_PRIORITY, {PRIORITY_LOW}, 0)
+	loweredByUs[unitID] = true
+end
+
+local function RestorePriority(unitID)
+	if not loweredByUs[unitID] then
+		return
+	end
+	loweredByUs[unitID] = nil
+	if not playerPriority[unitID] and spValidUnitID(unitID) and not spGetUnitIsDead(unitID) then
+		spGiveOrderToUnit(unitID, CMD_PRIORITY, {PRIORITY_NORMAL}, 0)
+	end
+end
+
+RestoreAllPriorities = function()
+	for unitID in pairs(loweredByUs) do
+		RestorePriority(unitID)
+	end
+end
+
+-- Priority only matters while metal is short, so steer only then.
+local function SteerPriority()
+	local ahead
+	if options.steerPriority.value and metalHigh == 0 then
+		if splitImbalance > SPLIT_DEADBAND then
+			ahead = "units"
+		elseif splitImbalance < -SPLIT_DEADBAND then
+			ahead = "econ"
+		end
+	end
+	for factoryID in pairs(factories) do
+		if ahead == "units" then
+			LowerPriority(factoryID)
+		else
+			RestorePriority(factoryID)
+		end
+	end
+	for unitID in pairs(loweredByUs) do
+		if not factories[unitID] and not (ahead == "econ" and assignedSide[unitID] == "econ") then
+			RestorePriority(unitID)
+		end
+	end
+	if ahead == "econ" then
+		for unitID, side in pairs(assignedSide) do
+			if side == "econ" then
+				LowerPriority(unitID)
+			end
+		end
+	end
+end
 
 local function UpdateResources()
 	local metal = StorageFullness("metal")
@@ -774,6 +975,20 @@ local function JobCost(wx, wz, speed, buildDistance, job, currentKey, travelFact
 		cost = cost + options.resurrectLowEnergyCost.value * energyLow
 	end
 
+	if job.produces == "metal" then
+		cost = cost - options.metalNeedBonus.value * metalLow
+	elseif job.produces == "energy" then
+		cost = cost - options.energyNeedBonus.value * energyLow
+	elseif job.produces == "production" or job.factoryAssist then
+		cost = cost - options.productionNeedBonus.value * metalHigh
+	end
+
+	if job.econ then
+		cost = cost - options.splitWeight.value * splitImbalance
+	elseif job.factoryAssist then
+		cost = cost + options.splitWeight.value * splitImbalance
+	end
+
 	if job.owner ~= spGetMyPlayerID() then
 		cost = cost + options.allyJobCost.value
 	end
@@ -808,6 +1023,7 @@ local function Assign(unitID, job, frame)
 	assignment[unitID] = job.key
 	assignedCmd[unitID] = cmd
 	assignedFrame[unitID] = frame
+	assignedSide[unitID] = (job.econ and "econ") or (job.factoryAssist and "units") or nil
 	SetOurCount(job.key, (ourCount[job.key] or 0) + 1)
 end
 
@@ -838,7 +1054,7 @@ local function CheckWorker(unitID, share, frame)
 	-- nothing left to do, so that job is done once the last of our workers on
 	-- it goes idle (others may still be finishing their part of the area).
 	local owner, jobId = SplitKey(key)
-	local jobCmd = share.GetCmdId(owner, jobId)
+	local jobCmd = owner and share.GetCmdId(owner, jobId)
 	if jobCmd then
 		local isOwnAreaJob = owner == spGetMyPlayerID() and jobCmd >= 0 and not share.GetTarget(owner, jobId)
 		if isOwnAreaJob and (ourCount[key] or 0) <= 1 then
@@ -873,6 +1089,7 @@ end
 
 local function UpdateWorkers(share)
 	UpdateResources()
+	UpdateSplit()
 	local frame = spGetGameFrame()
 	local jobs = CollectJobs(share, AverageBuildPower(), frame)
 	for unitID in pairs(workers) do
@@ -915,6 +1132,7 @@ local function UpdateWorkers(share)
 			end
 		end
 	end
+	SteerPriority()
 end
 
 local updateTimer = 0
@@ -1095,6 +1313,16 @@ function widget:CommandsChanged()
 end
 
 function widget:CommandNotify(cmdID, params, opts)
+	-- The player set build priority themselves: never touch those units'.
+	if cmdID == CMD_PRIORITY then
+		local selectedUnits = spGetSelectedUnits()
+		for i = 1, #selectedUnits do
+			playerPriority[selectedUnits[i]] = true
+			loweredByUs[selectedUnits[i]] = nil
+		end
+		return false
+	end
+
 	if cmdID == CMD_GLOBAL_BUILD then
 		SetGlobalBuildState(params[1])
 		return true
@@ -1183,6 +1411,7 @@ function widget:Initialize()
 end
 
 function widget:Shutdown()
+	RestoreAllPriorities()
 	WG.GlobalBuildCommandV2 = nil
 end
 
@@ -1229,6 +1458,9 @@ function widget:UnitDestroyed(unitID, unitDefID, unitTeam)
 	Unassign(unitID)
 	failedUntil[unitID] = nil
 	workers[unitID] = nil
+	factories[unitID] = nil
+	loweredByUs[unitID] = nil
+	playerPriority[unitID] = nil
 
 	-- A build job's unfinished unit was destroyed: the job goes back to
 	-- needing building from scratch. (A finished one's job was removed in
@@ -1251,7 +1483,9 @@ end
 function widget:UnitTaken(unitID, unitDefID, oldTeam, newTeam)
 	if oldTeam == managedTeamID and newTeam ~= managedTeamID then
 		Unassign(unitID)
+		RestorePriority(unitID)
 		workers[unitID] = nil
+		factories[unitID] = nil
 	end
 end
 
