@@ -7,7 +7,8 @@
 --           WG.GlobalBuildQueueShare (gui_global_build_queue_ally.lua)
 --           instead of being handed to the selected units, so you can keep
 --           an army selected and still queue jobs for your constructors.
---           No worker allocation yet.
+--           Constructors join or leave GBC with the Global Build state
+--           button (on by default). No worker allocation yet.
 --
 --  Usage:
 --    Tab (default; rebind under Hotkeys/Construction)
@@ -20,6 +21,9 @@
 --    right drag    - while GBC mode is on, remove every job this widget
 --                    queued inside the circle.
 --    escape        - cancel an in-progress right-drag.
+--    Global Build state button (constructors only; hidden in the command
+--    panel by default, see integral_menu_culling.lua)
+--                  - whether the selected constructors are GBC workers.
 --
 --  Orders are taken in CommandNotify, so only orders that go through the
 --  engine's normal command path are seen. Widgets that give build orders
@@ -49,6 +53,7 @@ function widget:GetInfo()
 end
 
 include("keysym.lua")
+VFS.Include("LuaRules/Configs/customcmds.h.lua")
 
 local spGetMouseState     = Spring.GetMouseState
 local spTraceScreenRay    = Spring.TraceScreenRay
@@ -56,6 +61,11 @@ local spGetGroundHeight   = Spring.GetGroundHeight
 local spGetUnitPosition   = Spring.GetUnitPosition
 local spGetFeaturePosition = Spring.GetFeaturePosition
 local spEcho              = Spring.Echo
+local spGetMyTeamID       = Spring.GetMyTeamID
+local spGetTeamUnits      = Spring.GetTeamUnits
+local spGetUnitDefID      = Spring.GetUnitDefID
+local spGetUnitIsStunned  = Spring.GetUnitIsStunned
+local spGetSelectedUnits  = Spring.GetSelectedUnits
 
 local CMD_REPAIR    = CMD.REPAIR
 local CMD_RECLAIM   = CMD.RECLAIM
@@ -79,6 +89,22 @@ local active = false -- GBC mode on/off, toggled by the toggle hotkey
 local myJobs = {}
 
 local dragX, dragZ, dragR -- in-progress right-drag for area removal
+
+local myTeamID = spGetMyTeamID()
+
+-- GBC membership, set per constructor with the Global Build state button.
+-- This is only "does GBC control this unit", not what the unit is doing -
+-- worker status (idle, direct orders, working a job) is the worker AI's
+-- concern and gets its own tables later.
+--
+-- builderInclude[unitID] = true/false for every mobile builder on our team,
+-- including unfinished ones, so a nanoframe keeps its state once finished.
+-- New builders start included.
+local builderInclude = {}
+
+-- workers[unitID] = true for every builder that is both included and
+-- finished: the set the worker AI will assign jobs to.
+local workers = {}
 
 --------------------------------------------------------------------------------
 -- Helpers
@@ -121,6 +147,65 @@ options = {
 	},
 }
 
+--------------------------------------------------------------------------------
+-- Membership
+--------------------------------------------------------------------------------
+
+local function IsNanoframe(unitID)
+	local _, _, beingBuilt = spGetUnitIsStunned(unitID)
+	return beingBuilt
+end
+
+-- Recomputes whether one builder belongs in workers.
+local function RefreshWorker(unitID)
+	if builderInclude[unitID] and not IsNanoframe(unitID) then
+		workers[unitID] = true
+	else
+		workers[unitID] = nil
+	end
+end
+
+local function AddBuilder(unitID, unitDefID)
+	if not UnitDefs[unitDefID].isMobileBuilder then
+		return
+	end
+	if builderInclude[unitID] == nil then
+		builderInclude[unitID] = true
+	end
+	RefreshWorker(unitID)
+end
+
+local function RemoveBuilder(unitID)
+	builderInclude[unitID] = nil
+	workers[unitID] = nil
+end
+
+-- Rebuilds membership from scratch for our current team, eg. on startup or
+-- after our team changes.
+local function ScanTeam()
+	builderInclude = {}
+	workers = {}
+	local units = spGetTeamUnits(myTeamID)
+	if not units then
+		return
+	end
+	for i = 1, #units do
+		local unitID = units[i]
+		AddBuilder(unitID, spGetUnitDefID(unitID))
+	end
+end
+
+local function SetGlobalBuildState(state)
+	local selectedUnits = spGetSelectedUnits()
+	for i = 1, #selectedUnits do
+		local unitID = selectedUnits[i]
+		if builderInclude[unitID] ~= nil then
+			builderInclude[unitID] = (state == 1)
+			RefreshWorker(unitID)
+		end
+	end
+end
+
 -- Queues one job and remembers it for right-drag removal.
 local function QueueJob(job)
 	local jobId = WG.GlobalBuildQueueShare.Update(job)
@@ -131,7 +216,34 @@ end
 -- Callins
 --------------------------------------------------------------------------------
 
+-- Adds the Global Build on/off state button when a constructor is selected,
+-- showing the state of the first selected constructor.
+function widget:CommandsChanged()
+	local selectedUnits = spGetSelectedUnits()
+	for i = 1, #selectedUnits do
+		local include = builderInclude[selectedUnits[i]]
+		if include ~= nil then
+			local customCommands = widgetHandler.customCommands
+			customCommands[#customCommands+1] = {
+				id      = CMD_GLOBAL_BUILD,
+				type    = CMDTYPE.ICON_MODE,
+				tooltip = 'Toggle using global build command for workers.',
+				name    = 'Global Build',
+				cursor  = 'Repair',
+				action  = 'globalbuild',
+				params  = {include and 1 or 0, 'off', 'on'},
+			}
+			return
+		end
+	end
+end
+
 function widget:CommandNotify(cmdID, params, opts)
+	if cmdID == CMD_GLOBAL_BUILD then
+		SetGlobalBuildState(params[1])
+		return true
+	end
+
 	if not active or not WG.GlobalBuildQueueShare then
 		return false
 	end
@@ -165,6 +277,47 @@ function widget:CommandNotify(cmdID, params, opts)
 	end
 
 	return false
+end
+
+function widget:Initialize()
+	myTeamID = spGetMyTeamID()
+	ScanTeam()
+end
+
+function widget:PlayerChanged(playerID)
+	local teamID = spGetMyTeamID()
+	if teamID ~= myTeamID then
+		myTeamID = teamID
+		ScanTeam()
+	end
+end
+
+function widget:UnitCreated(unitID, unitDefID, unitTeam)
+	if unitTeam == myTeamID then
+		AddBuilder(unitID, unitDefID)
+	end
+end
+
+function widget:UnitFinished(unitID, unitDefID, unitTeam)
+	if unitTeam == myTeamID and builderInclude[unitID] ~= nil then
+		RefreshWorker(unitID)
+	end
+end
+
+function widget:UnitDestroyed(unitID, unitDefID, unitTeam)
+	RemoveBuilder(unitID)
+end
+
+function widget:UnitGiven(unitID, unitDefID, newTeam, oldTeam)
+	if newTeam == myTeamID then
+		AddBuilder(unitID, unitDefID)
+	end
+end
+
+function widget:UnitTaken(unitID, unitDefID, oldTeam, newTeam)
+	if oldTeam == myTeamID and newTeam ~= myTeamID then
+		RemoveBuilder(unitID)
+	end
 end
 
 function widget:KeyPress(key)
