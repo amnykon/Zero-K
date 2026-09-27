@@ -361,7 +361,7 @@ options = {
 	dangerRadius = {
 		name = 'Danger radius (elmos)',
 		desc = 'Units within this distance of a job count towards its danger.',
-		type = 'number', min = 100, max = 2000, step = 50, value = 600,
+		type = 'number', min = 100, max = 6000, step = 50, value = 2000,
 		path = COSTS_PATH,
 	},
 	dangerPerMetal = {
