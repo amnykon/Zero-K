@@ -82,6 +82,9 @@ local custom_cmd_actions = {
 	upgradecommstop = {cmdType = 3, name = "Stop Upgrade Commander"},
 	stopproduction = {cmdType = 3, name = "Stop Factory Production"},
 	globalbuildcancel = {cmdType = 1, name = "Cancel Global Build Tasks"},
+	gbceco = {cmdType = 3, name = "Global Build: Eco Focus"},
+	gbcbalanced = {cmdType = 3, name = "Global Build: Balanced"},
+	gbcarmy = {cmdType = 3, name = "Global Build: Army Focus"},
 	evacuate = {cmdType = 3, name = "Evacuate"},
 	morph = {cmdType = 3, name = "Morph (and stop morph)"},
 
@@ -218,6 +221,9 @@ local usedActions = {
 
 	-- These actions are used, just not by selecting everything with default UI
 	["globalbuild"] = true,
+	["gbceco"] = true,
+	["gbcbalanced"] = true,
+	["gbcarmy"] = true,
 	["upgradecommstop"] = true,
 	["autoeco"] = true,
 	["evacuate"] = true,

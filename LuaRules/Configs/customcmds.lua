@@ -32,6 +32,9 @@ local commands = {
 
 	GLOBAL_BUILD = 13925, -- global build command state toggle command
 	GBCANCEL = 13926, -- global build command area cancel cmd
+	GBC_ECO = 13927, -- global build command economy/units split presets
+	GBC_BALANCED = 13928,
+	GBC_ARMY = 13929,
 	STOP_PRODUCTION = 13954,
 	SELECTION_RANK = 13987,
 	FORMATION_RANK = 13988,

@@ -38,6 +38,9 @@ local cmdPosDef = {
 	[CMD.STOCKPILE]       = {pos = 7, priority = 0.25},
 	[CMD_ABANDON_PW]      = {pos = 7, priority = 0.3},
 	[CMD_GBCANCEL]        = {pos = 7, priority = 0.4},
+	[CMD_GBC_ECO]         = {pos = 13, priority = 0.1},
+	[CMD_GBC_BALANCED]    = {pos = 13, priority = 0.2},
+	[CMD_GBC_ARMY]        = {pos = 13, priority = 0.3},
 	[CMD_STOP_PRODUCTION] = {pos = 7, priority = 0.7},
 	
 	[CMD_BUILD]         = {pos = 7, priority = 0.8},

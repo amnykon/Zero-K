@@ -54,6 +54,7 @@ function widget:GetInfo()
 		date      = "September 26, 2026",
 		license   = "GNU GPL, v2 or later",
 		layer     = 1001, -- CommandNotify runs from the highest layer down, so this sees orders before most other widgets
+		handler   = true, -- CommandsChanged needs widgetHandler.customCommands and widgetHandler.commands
 		enabled   = true,
 	}
 end
@@ -63,6 +64,7 @@ VFS.Include("LuaRules/Configs/customcmds.h.lua")
 VFS.Include("LuaRules/Configs/constants.lua") -- HIDDEN_STORAGE
 
 local spGetMouseState     = Spring.GetMouseState
+local spGetActiveCommand  = Spring.GetActiveCommand
 local spTraceScreenRay    = Spring.TraceScreenRay
 local spGetGroundHeight   = Spring.GetGroundHeight
 local spGetUnitPosition   = Spring.GetUnitPosition
@@ -104,6 +106,9 @@ local CMD_REPAIR    = CMD.REPAIR
 local CMD_RECLAIM   = CMD.RECLAIM
 local CMD_RESURRECT = CMD.RESURRECT
 local CMD_GUARD     = CMD.GUARD
+-- The walk to a job cmd_raw_move.lua puts in front of a constructor's order
+-- while it's out of range.
+local CMD_RAW_BUILD = Spring.Utilities.CMD.RAW_BUILD
 
 local sqrt  = math.sqrt
 
@@ -118,6 +123,11 @@ end
 local active = false -- GBC mode on/off, toggled by the toggle hotkey
 
 local dragX, dragZ, dragR -- in-progress right-drag for area removal
+local dragScreenX, dragScreenY -- where that right-press was on screen, to tell a click from a drag
+
+-- A right-press that moves less than this (in pixels) is a click, which
+-- closes GBC mode, rather than a drag, which removes jobs.
+local CLICK_MAX_MOVE_SQ = 8*8
 
 -- The team whose constructors this player's GBC manages, or nil for none.
 -- Only the team's leader manages it: with commshare, several players control
@@ -147,12 +157,19 @@ local assignedFrame = {}
 -- ourCount[key] = how many of our workers are on that job, as reported to the
 -- job store with Assist().
 local ourCount = {}
+-- baseCosts[key] = that job's JobBaseCost() for a worker not on it, while
+-- UpdateWorkers runs, or nil outside it. Cleared for a job when its ourCount
+-- changes, since its crowd changes with it.
+local baseCosts
 -- failedUntil[unitID][key] = game frame until which that worker won't retry a
 -- job it went idle on without finishing (eg. couldn't reach it).
 local failedUntil = {}
 -- assignedSide[unitID] = "econ" or "units" for a worker on an economy job or
 -- helping a factory, for the economy/units split.
 local assignedSide = {}
+-- assignedProduces[unitID] = "metal", "energy" or "production" for a worker
+-- on a job building one (for the economy log).
+local assignedProduces = {}
 local Unassign -- defined in the Worker AI section
 local RestoreAllPriorities -- defined in the Worker AI section
 
@@ -253,8 +270,19 @@ local function ExistingBuildingAt(unitDefID, x, z)
 	return nil
 end
 
-local function ElevationNeeded(x, z, elevation)
-	return math.abs(spGetGroundHeight(x, z) - elevation) > TERRAFORM_TOLERANCE
+-- Whether the ground under a building's footprint isn't yet level at the
+-- elevation: its centre or any corner is off. The centre alone misses a slope
+-- levelled to the height it has in the middle (as the energy grid asks for).
+local function ElevationNeeded(unitDef, x, z, facing, elevation)
+	-- A heightmap square in from the edge: right at the edge, the height is
+	-- blended with the unlevelled ground outside.
+	local fx, fz = FootprintHalf(unitDef, facing)
+	fx, fz = math.max(0, fx - 8), math.max(0, fz - 8)
+	local function off(px, pz)
+		return math.abs(spGetGroundHeight(px, pz) - elevation) > TERRAFORM_TOLERANCE
+	end
+	return off(x, z) or off(x + fx, z + fz) or off(x + fx, z - fz)
+		or off(x - fx, z + fz) or off(x - fx, z - fz)
 end
 
 -- The height a wall should reach, from the building's base.
@@ -331,13 +359,23 @@ end
 
 local function StopDrag()
 	dragX, dragZ, dragR = nil, nil, nil
+	dragScreenX, dragScreenY = nil, nil
 end
 
 local function SetActive(on)
 	active = on
 	StopDrag()
 	Spring.ForceLayoutUpdate() -- re-run CommandsChanged, to show/hide Global Build Cancel
-	spEcho("GBC mode: " .. (active and "ON (orders are queued as GBC jobs, right-drag to remove)" or "OFF"))
+	spEcho("GBC mode: " .. (active and "ON (orders are queued as GBC jobs, right-drag to remove, right-click or Esc to close)" or "OFF"))
+end
+
+-- Close GBC mode and drop any armed command with it, like closing the missile
+-- launcher, so the next click doesn't place an ordinary order by surprise.
+local function Dismiss()
+	if spGetActiveCommand() then
+		Spring.SetActiveCommand(nil)
+	end
+	SetActive(false)
 end
 
 --------------------------------------------------------------------------------
@@ -365,19 +403,21 @@ end
 options_path = 'Settings/Unit Behaviour/Worker AI'
 options_order = {
 	'toggle', 'workerAI', 'updateRate',
-	'switchCost',
+	'switchCost', 'travelWeight',
 	'targetFinishTime', 'minPreferred', 'maxPreferred', 'areaPreferred',
 	'shortHandedBonus', 'overStaffedCost',
-	'largeMinMetal', 'completionWeight', 'completionMinProgress',
+	'largeMinMetal', 'completionWeight', 'completionMinProgress', 'largeConcurrentCost',
 	'highMetalFrom', 'repairHighMetalCost',
 	'lowMetalBelow', 'reclaimHighMetalCost', 'reclaimLowMetalBonus',
 	'lowEnergyBelow', 'repairLowEnergyCost', 'resurrectLowEnergyCost',
 	'allyJobCost', 'waitingBonusPerMinute', 'waitingBonusMax', 'commanderTravelFactor',
-	'metalNeedBonus', 'energyNeedBonus', 'productionNeedBonus',
-	'assistFactories', 'econShare', 'splitWeight', 'factoryAssistPreferred', 'steerPriority',
+	'metalNeedBonus', 'energyNeedBonus', 'incomeBalanceBand', 'productionNeedBonus',
+	'assistFactories', 'factoryFallback', 'factoryFallbackCost', 'econShare', 'splitWeight', 'factoryAssistPreferred', 'factoryAssistCost', 'factoryAssistLowMetalCost',
+	'backupReclaim', 'backupReclaimCost', 'steerPriority',
 	'dangerRadius', 'dangerPerMetal', 'dangerMax', 'dangerAllyMultiplier', 'dangerDefenceMultiplier', 'dangerRadarDotMetal',
-	'autoCaretakers', 'autoCaretakersIdleFactories', 'maxCaretakersPerFactory',
+	'autoCaretakers', 'autoCaretakersIdleFactories', 'maxCaretakersPerFactory', 'caretakerNeedBonus',
 	'lowPriorityCost', 'highPriorityDiscount',
+	'debugCosts', 'debugEconLog', 'debugWorkerLog',
 }
 options = {
 	workerAI = {
@@ -404,6 +444,12 @@ options = {
 	-- travel time to the job plus these kickers.
 	switchCost = CostOption('Switch cost',
 		'Extra cost of pulling a worker off the job it is on: it only switches if another job is cheaper by more than this.', 5),
+	travelWeight = {
+		name = 'Travel time weight',
+		desc = 'How much each second of a worker\'s travel time to a job counts against the other costs. Lower lets the other costs (need, priority, crowding) pick further-off jobs; 1 counts travel time in full.',
+		type = 'number', min = 0.1, max = 2, step = 0.05, value = 0.5,
+		path = COSTS_PATH,
+	},
 	targetFinishTime = {
 		name = 'Target finish time (seconds)',
 		desc = 'Sets each job\'s preferred worker count: enough average GBC workers to build it in about this long. A building\'s count is fixed for its whole build; repair uses the target\'s build time.',
@@ -438,6 +484,8 @@ options = {
 		type = 'number', min = 0, max = 10000, step = 50, value = 1000,
 		path = COSTS_PATH,
 	},
+	largeConcurrentCost = CostOption('Large project: cost of starting another',
+		'Added to starting a large project (see Large project: from) for each large project already in progress, so they are finished one at a time rather than several at once. Your own is in progress once it has a nanoframe or a worker on it; an ally\'s only while your workers are on it (so joining one counts as starting it), as only then is it spending your metal.', 30, 120),
 	completionWeight = CostOption('Large project: completion bonus',
 		'Taken off a large project\'s cost, scaled by its build progress, so nearly finished ones pull workers in to finish them.', 20),
 	completionMinProgress = {
@@ -448,7 +496,7 @@ options = {
 	},
 	highMetalFrom = {
 		name = 'High metal: from (share of storage)',
-		desc = 'Metal counts as high from this share of your metal storage (0 to 1), rising to fully high when storage is full.',
+		desc = 'Metal counts as high from this share of your metal storage (0 to 1), rising to fully high when storage is full - scaled down while build power wants more metal than comes in, so metal being spent down doesn\'t count.',
 		type = 'number', min = 0, max = 1, step = 0.05, value = 0.5,
 		path = COSTS_PATH,
 	},
@@ -487,22 +535,31 @@ options = {
 		path = COSTS_PATH,
 	},
 	metalNeedBonus = CostOption('Metal need bonus',
-		'Taken off building mexes, scaled by how low metal is.', 15),
+		'Taken off building mexes, scaled by how much more metal is needed: metal is low, metal income is behind energy income, or build power wants more than comes in (unless energy income is the one behind).', 15),
 	energyNeedBonus = CostOption('Energy need bonus',
-		'Taken off building energy (solar, wind, fusion, geothermal, singularity), scaled by how low energy is.', 15),
+		'Taken off building energy (solar, wind, fusion, geothermal, singularity), scaled by how much more energy is needed: energy is low, energy income is behind metal income, or build power wants more than comes in (unless metal income is the one behind).', 15),
+	incomeBalanceBand = {
+		name = 'Metal/energy income: even within',
+		desc = 'Building spends metal and energy about 1:1. Incomes within this share (0 to 1) of each other count as even: mexes and energy get the same bonus, so workers aren\'t pulled off one for the other. Beyond it, whichever income is behind gets the bonus, fully so once it is behind by this much more again.',
+		type = 'number', min = 0, max = 0.5, step = 0.05, value = 0.1,
+		path = COSTS_PATH,
+	},
 	productionNeedBonus = CostOption('Build power need bonus',
-		'Taken off building caretakers and factories, and off helping factories, scaled by how high metal is: metal piling up means there isn\'t enough build power to spend it.', 15),
+		'Taken off building caretakers and factories, and off helping factories, scaled by how high metal is: metal piling up means there isn\'t enough build power to spend it. Metal being spent faster than it comes in doesn\'t count as high.', 15),
 	assistFactories = {
 		name = 'Help factories',
-		desc = 'Let GBC workers help (guard) your factories while they are producing, as the "units" side of the economy/units split.',
+		desc = 'Let GBC workers help (guard) your factories while they are producing, as the "units" side of the economy/units split. Off, factories get their build power from caretakers instead (see Auto-build caretakers).',
 		type = 'bool',
-		value = true,
+		value = false,
 		noHotkey = true,
 	},
 	econShare = {
 		name = 'Economy vs units: economy share',
-		desc = 'The share (0 to 1) of build power - GBC workers plus producing factories - to spend on economy (mexes, energy, storage, pylons). The rest goes to units: factories and GBC workers helping them.',
+		desc = 'The share (0 to 1) of build power - GBC workers plus producing factories - to spend on economy (mexes, energy, storage, pylons). The rest goes to units: factories and GBC workers helping them. The Eco, Balanced and Army buttons in GBC mode\'s orders set it too.',
 		type = 'number', min = 0, max = 1, step = 0.05, value = 0.5,
+		OnChange = function(self)
+			Spring.ForceLayoutUpdate() -- re-mark which preset button is in use
+		end,
 	},
 	splitWeight = CostOption('Economy vs units: steering strength',
 		'How strongly the economy share steers workers: economy jobs get up to this much cheaper when economy is behind its share, and helping factories this much dearer (and the other way round when units are behind).', 20),
@@ -512,6 +569,28 @@ options = {
 		type = 'number', min = 1, max = 20, step = 1, value = 3,
 		path = COSTS_PATH,
 	},
+	factoryAssistCost = CostOption('Help factory cost',
+		'Added to helping a factory, so it is what workers fall back on: a queued job is taken instead unless it is this much further away.', 10),
+	factoryFallback = {
+		name = 'Help factories when there\'s nothing else',
+		desc = 'With Help factories off: GBC workers with no other job to take help (guard) your producing factories, so spare build power goes into units rather than standing idle. They leave for any job that comes up. Energy expansion (fusions, singularities) is left to you.',
+		type = 'bool',
+		value = true,
+		noHotkey = true,
+	},
+	factoryFallbackCost = CostOption('Help factories when there\'s nothing else: cost',
+		'Added to helping a factory as a fallback (see Help factories when there\'s nothing else), on top of Help factory cost, so any queued job, caretaker or backup reclaim is taken first.', 30, 120),
+	backupReclaim = {
+		name = 'Backup: reclaim near our buildings',
+		desc = 'When there is nothing better to do, area reclaim wrecks and other metal near your buildings, where it is safe (no danger, see Danger radius).',
+		type = 'bool',
+		value = true,
+		noHotkey = true,
+	},
+	backupReclaimCost = CostOption('Backup reclaim cost',
+		'Added to backup reclaim, so workers only fall back on it: a queued job is taken instead unless it is this much further away.', 20),
+	factoryAssistLowMetalCost = CostOption('Help factory cost when metal is short',
+		'Added to helping a factory, scaled by how much more metal is needed: without the metal to spend, more build power on a factory only spreads it thinner.', 20),
 	steerPriority = {
 		name = 'Steer build priority',
 		desc = 'While metal is short, lower whichever side of the economy/units split is ahead to Low build priority: factories when units are ahead, GBC workers on economy jobs when economy is ahead. Only ever between Normal and Low, never High, and never a unit whose priority you set yourself. Units it lowered go back to Normal when no longer ahead.',
@@ -553,7 +632,7 @@ options = {
 	},
 	autoCaretakers = {
 		name = 'Auto-build caretakers',
-		desc = 'While metal is high (see High metal), queue caretakers beside your producing factories, up to a number per factory. They are ordinary GBC jobs: shown, and removable like any other.',
+		desc = 'Queue caretakers beside your producing factories until they and the factories can spend the units share of your metal income (see Economy vs units) - or more, when your GBC workers\' build power can\'t spend all of the economy share, so metal doesn\'t pile up. Each spends up to its build power in metal a second. They go beside the factory with the fewest first, and are ordinary GBC jobs: shown, and removable like any other.',
 		type = 'bool',
 		value = true,
 		noHotkey = true,
@@ -567,13 +646,36 @@ options = {
 	},
 	maxCaretakersPerFactory = {
 		name = 'Auto-build caretakers: per factory',
-		desc = 'How many caretakers (built or queued) to have beside each factory.',
-		type = 'number', min = 1, max = 20, step = 1, value = 4,
+		desc = 'The most caretakers (built or queued) to have beside each factory, however much income there is to spend.',
+		type = 'number', min = 1, max = 30, step = 1, value = 12,
 	},
+	caretakerNeedBonus = CostOption('Caretaker need bonus',
+		'Taken off building your caretakers, scaled by how far short the units side is of the caretakers it should have (see Auto-build caretakers), in full once two short: brings a worker back to base to build them. None once there are enough.', 30, 120),
 	lowPriorityCost = CostOption('Low priority job cost',
 		'Added to jobs marked low priority.', 15),
 	highPriorityDiscount = CostOption('High priority job discount',
 		'Taken off jobs the player marked high priority.', 30, 120),
+	debugCosts = {
+		name = 'Debug: show job costs',
+		desc = 'Print each job\'s cost above it, as an unassigned worker would see it, leaving out its travel time. Updated on each worker AI update.',
+		type = 'bool',
+		value = false,
+		noHotkey = true,
+	},
+	debugWorkerLog = {
+		name = 'Debug: log workers',
+		desc = 'Every 10 seconds, write a line to the infolog for each GBC worker: the job it is on, how far it is from it and how long it takes to get there, and that job\'s cost.',
+		type = 'bool',
+		value = false,
+		noHotkey = true,
+	},
+	debugEconLog = {
+		name = 'Debug: log the economy',
+		desc = 'Every 10 seconds, write a line to the infolog with income and spending, what the worker AI makes of them (needs, caretakers), and where build power is going.',
+		type = 'bool',
+		value = false,
+		noHotkey = true,
+	},
 	toggle = {
 		name = 'Toggle GBC Mode',
 		desc = 'While on, build/repair/reclaim/resurrect orders are queued as Global Build Command jobs instead of being given to the selected units.',
@@ -762,6 +864,9 @@ local function SetOurCount(key, count)
 		count = 0
 	end
 	ourCount[key] = (count > 0) and count or nil
+	if baseCosts then
+		baseCosts[key] = nil
+	end
 	local share = WG.GlobalBuildQueueShare
 	local owner, jobId = SplitKey(key)
 	if share and owner then -- not for helping a factory, which isn't a job store job
@@ -778,6 +883,7 @@ Unassign = function(unitID)
 	assignedCmd[unitID] = nil
 	assignedFrame[unitID] = nil
 	assignedSide[unitID] = nil
+	assignedProduces[unitID] = nil
 	SetOurCount(key, (ourCount[key] or 1) - 1)
 end
 
@@ -857,8 +963,11 @@ local function CleanOwnJobs(share)
 				-- already there when a wall was ordered around it), by
 				-- terraform still going on, or by something else.
 				local existing = ExistingBuildingAt(-cmd, x, z)
+				local elevation = share.GetElevation(me, jobId)
 				if existing and wall then
 					SetOwnJobUnitID(share, jobId, existing) -- on to its wall
+				elseif not existing and elevation and ElevationNeeded(UnitDefs[-cmd], x, z, facing, elevation) then
+					done = false -- not levelled yet: the job levels it first
 				else
 					done = not TerraformPendingAt(x, z, TerraformRadius(UnitDefs[-cmd]))
 				end
@@ -900,7 +1009,8 @@ local function BuildCategory(unitDef)
 	local cp = unitDef.customParams
 	if cp.ismex then
 		return "metal", true
-	elseif (unitDef.energyMake or 0) > 0 or cp.windgen then
+	-- (unitdefs_post.lua moves energyMake into income_energy, leaving it 0.)
+	elseif (tonumber(cp.income_energy) or 0) > 0 or (unitDef.energyMake or 0) > 0 or cp.windgen then
 		return "energy", true
 	elseif (unitDef.buildSpeed or 0) > 0 then
 		return "production", false
@@ -926,6 +1036,10 @@ end
 -- a lot of CPU in a big game. dangerCache[cellKey] = {enemy, allied, defence}.
 local DANGER_CELL = 256
 local dangerCache = {}
+
+-- {x, y, z, cost} per job from the last worker AI update, for the debugCosts
+-- option, or nil.
+local debugCosts
 
 local function DangerSums(x, z)
 	local radius = options.dangerRadius.value
@@ -990,6 +1104,54 @@ local waitingSince = {}
 
 -- Every job in our own and our allies' queues that can still be worked on,
 -- with what the cost needs precomputed once per update.
+-- Backup reclaim: for each BACKUP_RECLAIM_CELL square with one of our
+-- buildings in it and at least BACKUP_RECLAIM_MIN_METAL of reclaimable metal,
+-- an area reclaim over the square. Which squares is worked out every
+-- BACKUP_RECLAIM_FRAMES, as it looks at all our units and the features near
+-- them; whether each is safe, every update. These aren't job store jobs;
+-- their keys start with "r#".
+local BACKUP_RECLAIM_CELL = 512
+local BACKUP_RECLAIM_RADIUS = BACKUP_RECLAIM_CELL * 0.75 -- reaches the square's corners
+local BACKUP_RECLAIM_MIN_METAL = 10
+local BACKUP_RECLAIM_FRAMES = 5 * 30
+local backupReclaimCells = {}
+local backupReclaimFrame
+
+local function FindBackupReclaimCells()
+	local cells, seen = {}, {}
+	local units = spGetTeamUnits(managedTeamID) or {}
+	for i = 1, #units do
+		local unitDefID = spGetUnitDefID(units[i])
+		local ud = unitDefID and UnitDefs[unitDefID]
+		local x, _, z = spGetUnitPosition(units[i])
+		if ud and ud.isImmobile and x then
+			local cx, cz = math.floor(x / BACKUP_RECLAIM_CELL), math.floor(z / BACKUP_RECLAIM_CELL)
+			local cellKey = cx .. "," .. cz
+			if not seen[cellKey] then
+				seen[cellKey] = true
+				local x1, z1 = cx * BACKUP_RECLAIM_CELL, cz * BACKUP_RECLAIM_CELL
+				local features = Spring.GetFeaturesInRectangle(x1, z1, x1 + BACKUP_RECLAIM_CELL, z1 + BACKUP_RECLAIM_CELL)
+				local metal = 0
+				for j = 1, #features do
+					local featureDefID = Spring.GetFeatureDefID(features[j])
+					local fd = featureDefID and FeatureDefs[featureDefID]
+					if fd and fd.reclaimable then
+						metal = metal + (Spring.GetFeatureResources(features[j]) or 0)
+					end
+				end
+				if metal >= BACKUP_RECLAIM_MIN_METAL then
+					cells[#cells+1] = {
+						key = "r#" .. cellKey,
+						x = x1 + BACKUP_RECLAIM_CELL / 2,
+						z = z1 + BACKUP_RECLAIM_CELL / 2,
+					}
+				end
+			end
+		end
+	end
+	return cells
+end
+
 local function CollectJobs(share, avgBuildPower, frame)
 	local jobs = {}
 	local stillWaiting = {}
@@ -1035,7 +1197,7 @@ local function CollectJobs(share, avgBuildPower, frame)
 					if built then
 						phase = (wall and WallNeeded(unitDef, x, z, facing, wall)) and "wall" or nil
 						valid = phase ~= nil
-					elseif not jobUnitID and elevation and ElevationNeeded(x, z, elevation) then
+					elseif not jobUnitID and elevation and ElevationNeeded(unitDef, x, z, facing, elevation) then
 						phase = "elevate"
 					elseif not jobUnitID and not elevation and TerraformPendingAt(x, z, radius) then
 						valid = false
@@ -1110,8 +1272,11 @@ local function CollectJobs(share, avgBuildPower, frame)
 
 	-- Helping each of our producing factories, as the "units" side of the
 	-- economy/units split. These aren't job store jobs; their keys start
-	-- with "f#".
-	if options.assistFactories.value then
+	-- with "f#". With Help factories off, they're still there as a fallback
+	-- (costing factoryFallbackCost more), so workers with nothing else to do
+	-- put their build power into units rather than standing idle.
+	local assistFallback = not options.assistFactories.value and options.factoryFallback.value
+	if options.assistFactories.value or assistFallback then
 		local me = spGetMyTeamID()
 		for factoryID in pairs(factories) do
 			if spGetUnitIsBuilding(factoryID) then
@@ -1123,9 +1288,30 @@ local function CollectJobs(share, avgBuildPower, frame)
 						preferred = options.factoryAssistPreferred.value,
 						others = 0, waitingBonus = 0,
 						factoryAssist = true,
+						fallback = assistFallback,
 						danger = DangerAt(fx, fz),
 					}
 				end
+			end
+		end
+	end
+
+	if options.backupReclaim.value then
+		if not backupReclaimFrame or frame >= backupReclaimFrame + BACKUP_RECLAIM_FRAMES then
+			backupReclaimCells = FindBackupReclaimCells()
+			backupReclaimFrame = frame
+		end
+		local me = spGetMyTeamID()
+		for i = 1, #backupReclaimCells do
+			local cell = backupReclaimCells[i]
+			if DangerAt(cell.x, cell.z) <= 0 then
+				jobs[#jobs+1] = {
+					key = cell.key, owner = me, cmd = CMD_RECLAIM,
+					x = cell.x, z = cell.z, r = BACKUP_RECLAIM_RADIUS,
+					preferred = options.areaPreferred.value,
+					others = 0, waitingBonus = 0, danger = 0,
+					backupReclaim = true,
+				}
 			end
 		end
 	end
@@ -1181,9 +1367,12 @@ local function LowAmount(fullness, below)
 	return math.max(0, (below - fullness) / below)
 end
 
--- How high metal is, how low metal is and how low energy is, each 0 to 1.
--- Set each update.
+-- How high metal is, how low metal is and how low energy is, each 0 to 1,
+-- from storage. metalNeed and energyNeed, also 0 to 1, are how much more
+-- metal and energy income we need, for the mex and energy bonuses. Set each
+-- update.
 local metalHigh, metalLow, energyLow = 0, 0, 0
+local metalNeed, energyNeed = 0, 0
 
 -- The economy/units split: economy share target minus the economy's actual
 -- share of build power, from -1 to 1. Positive means economy is behind (units
@@ -1280,18 +1469,100 @@ local function SteerPriority()
 	end
 end
 
+-- The share, 0 to 1, of 'wanted' that 'income' falls short of.
+local function Shortfall(income, wanted)
+	if not (income and wanted) or wanted <= 0 then
+		return 0
+	end
+	return math.max(0, math.min(1, (wanted - income) / wanted))
+end
+
+-- Metal and energy income, and what build power wants in metal, per
+-- second, averaged (see UpdateResources). Read each update.
+local metalIncome, energyIncome, metalPull = 0, 0, 0
+-- Income still to come from our metal and energy projects in progress (see
+-- ProjectedIncome), per second. Set each update, and again as workers take
+-- or leave those projects.
+local projectedMetal, projectedEnergy = 0, 0
+
+-- metalNeed and energyNeed, from the incomes counting the projected ones:
+-- that's what they'll be once the projects in progress are done, so several
+-- workers don't all start energy to make up the same shortfall.
+local function UpdateNeeds()
+	local metalIn = metalIncome + projectedMetal
+	local energyIn = energyIncome + projectedEnergy
+	-- Build power wanting more metal than comes (or is about to come) in.
+	local metalShort = Shortfall(metalIn, metalPull)
+
+	-- Building spends metal and energy about 1:1, so more of one income than
+	-- the other can't be spent. How far each is behind the other, 0 within
+	-- the band (about even), rising to 1 at twice the band.
+	local band = options.incomeBalanceBand.value
+	local function Behind(income, other)
+		local short = Shortfall(income, other)
+		if band <= 0 then
+			return (short > 0) and 1 or 0
+		end
+		return math.max(0, math.min(1, (short - band) / band))
+	end
+	local energyBehind = Behind(energyIn, metalIn)
+	local metalBehind = Behind(metalIn, energyIn)
+
+	-- Build power wanting more than comes in calls for more of both - evenly
+	-- while the incomes are about even, so neither pulls workers off the
+	-- other - less of whichever income is ahead, and more of the one behind.
+	metalNeed = math.max(metalLow, metalShort * (1 - energyBehind), metalBehind)
+	energyNeed = math.max(energyLow, metalShort * (1 - metalBehind), energyBehind)
+end
+
+-- Incomes and pull are averaged over about this long: energy income swings
+-- with the wind, and pull with what's being built, and the needs shouldn't
+-- flip workers back and forth with every gust.
+local INCOME_SMOOTH_SECONDS = 20
+local smoothedYet = false
+
 local function UpdateResources()
+	local _, _, pull, income = spGetTeamResources(managedTeamID, "metal")
+	local _, _, _, eIncome = spGetTeamResources(managedTeamID, "energy")
+	pull, income, eIncome = pull or 0, income or 0, eIncome or 0
+	-- The engine's energy income is what's left after overdrive
+	-- (unit_mex_overdrive.lua) has put the spare into mexes. What building
+	-- can use is all of it, so add the generators' income back the way the
+	-- resource bar (gui_chili_resource_bars.lua) does.
+	local generators = Spring.GetTeamRulesParam(managedTeamID, "OD_energyIncome")
+	if generators then
+		eIncome = eIncome + generators - math.max(0, Spring.GetTeamRulesParam(managedTeamID, "OD_energyChange") or 0)
+	end
+	if smoothedYet then
+		local k = math.min(1, options.updateRate.value / INCOME_SMOOTH_SECONDS)
+		metalIncome = metalIncome + (income - metalIncome) * k
+		metalPull = metalPull + (pull - metalPull) * k
+		energyIncome = energyIncome + (eIncome - energyIncome) * k
+	else
+		metalIncome, metalPull, energyIncome = income, pull, eIncome
+		smoothedYet = spGetGameFrame() > 0
+	end
+
 	local metal = StorageFullness("metal")
-	metalHigh = HighAmount(metal, options.highMetalFrom.value)
+	-- Metal only counts as high while it isn't draining, so a full storage we
+	-- are spending down fast (as at the start) doesn't call for build power.
+	metalHigh = HighAmount(metal, options.highMetalFrom.value) * (1 - Shortfall(metalIncome, metalPull))
 	metalLow = LowAmount(metal, options.lowMetalBelow.value)
 	energyLow = LowAmount(StorageFullness("energy"), options.lowEnergyBelow.value)
 end
 
 
-local function JobCost(wx, wz, speed, buildDistance, job, currentKey, travelFactor)
-	local dx, dz = wx - job.x, wz - job.z
-	local distance = math.sqrt(dx*dx + dz*dz) - buildDistance - (job.r or 0)
-	local cost = math.max(0, distance) / speed * travelFactor
+-- How short the units side is of the caretakers it should have, 0 to 1,
+-- counting only those built (see QueueCaretakers), for the caretaker need
+-- bonus. Set every caretaker check.
+local CARETAKER_DEF_ID = UnitDefNames.staticcon and UnitDefNames.staticcon.id
+local caretakerNeed = 0
+-- The last caretaker check's figures, for the economy log.
+local caretakerStats = {}
+
+-- A job's cost to a worker, leaving out its travel time.
+local function JobBaseCost(job, currentKey)
+	local cost = 0
 
 	-- Workers on it besides this one.
 	local crowd = job.others + (ourCount[job.key] or 0)
@@ -1332,22 +1603,54 @@ local function JobCost(wx, wz, speed, buildDistance, job, currentKey, travelFact
 		cost = cost + options.resurrectLowEnergyCost.value * energyLow
 	end
 
-	if job.produces == "metal" then
-		cost = cost - options.metalNeedBonus.value * metalLow
+	-- The need bonuses below say the job needs doing, not that it needs more
+	-- workers: they're only for a worker it's still short of, so a staffed
+	-- job doesn't pull extra workers off theirs from across the map.
+	local needed = crowd < preferred
+
+	if not needed then
+		-- (no need bonuses)
+	elseif job.produces == "metal" then
+		cost = cost - options.metalNeedBonus.value * metalNeed
 	elseif job.produces == "energy" then
-		cost = cost - options.energyNeedBonus.value * energyLow
+		cost = cost - options.energyNeedBonus.value * energyNeed
 	elseif job.produces == "production" or job.factoryAssist then
 		cost = cost - options.productionNeedBonus.value * metalHigh
+	end
+
+	-- Our caretakers, while we're short of them: brings a worker back to base
+	-- to build one rather than keeping one parked there.
+	if needed and job.cmd == -CARETAKER_DEF_ID and job.owner == spGetMyTeamID() then
+		cost = cost - options.caretakerNeedBonus.value * caretakerNeed
 	end
 
 	if job.danger > 0 then
 		cost = cost + math.min(options.dangerMax.value, job.danger * options.dangerPerMetal.value)
 	end
 
+	-- The economy/units steering: a cost for the side that's ahead always, a
+	-- bonus for the side that's behind only while the job needs workers.
+	local steer = 0
 	if job.econ then
-		cost = cost - options.splitWeight.value * splitImbalance
+		steer = -options.splitWeight.value * splitImbalance
 	elseif job.factoryAssist then
-		cost = cost + options.splitWeight.value * splitImbalance
+		steer = options.splitWeight.value * splitImbalance
+	end
+	if steer > 0 or needed then
+		cost = cost + steer
+	end
+
+	if job.backupReclaim then
+		cost = cost + options.backupReclaimCost.value
+	end
+
+	if job.fallback then
+		cost = cost + options.factoryFallbackCost.value
+	end
+
+	if job.factoryAssist then
+		cost = cost + options.factoryAssistCost.value
+			+ options.factoryAssistLowMetalCost.value * metalNeed
 	end
 
 	-- Only for another team's jobs: what our commshare teammates queue is on
@@ -1364,6 +1667,25 @@ local function JobCost(wx, wz, speed, buildDistance, job, currentKey, travelFact
 		cost = cost - options.highPriorityDiscount.value
 	end
 	return cost
+end
+
+-- JobBaseCost() for a worker not on the job, worked out once per job per
+-- update rather than once per worker.
+local function SharedBaseCost(job)
+	local cost = baseCosts[job.key]
+	if not cost then
+		cost = JobBaseCost(job)
+		baseCosts[job.key] = cost
+	end
+	return cost
+end
+
+-- The only part of a job's cost that differs from worker to worker, other
+-- than the worker's own job counting one fewer on it.
+local function TravelCost(wx, wz, speed, buildDistance, job, travelFactor)
+	local dx, dz = wx - job.x, wz - job.z
+	local distance = math.sqrt(dx*dx + dz*dz) - buildDistance - (job.r or 0)
+	return math.max(0, distance) / speed * travelFactor * options.travelWeight.value
 end
 
 local function Assign(unitID, job, frame)
@@ -1385,6 +1707,7 @@ local function Assign(unitID, job, frame)
 		assignedCmd[unitID] = TERRAFORM_CMDS
 		assignedFrame[unitID] = frame
 		assignedSide[unitID] = job.econ and "econ" or nil
+		assignedProduces[unitID] = job.produces
 		SetOurCount(job.key, (ourCount[job.key] or 0) + 1)
 		return
 	end
@@ -1404,6 +1727,7 @@ local function Assign(unitID, job, frame)
 	assignedCmd[unitID] = cmd
 	assignedFrame[unitID] = frame
 	assignedSide[unitID] = (job.econ and "econ") or (job.factoryAssist and "units") or nil
+	assignedProduces[unitID] = job.produces
 	SetOurCount(job.key, (ourCount[job.key] or 0) + 1)
 end
 
@@ -1421,6 +1745,9 @@ local function CheckWorker(unitID, share, frame)
 		return true -- our order may not have arrived yet
 	end
 	local cmd = spGetUnitCurrentCommand(unitID)
+	if cmd == CMD_RAW_BUILD then
+		cmd = spGetUnitCurrentCommand(unitID, 2) -- still walking to our order
+	end
 	local expected = assignedCmd[unitID]
 	if cmd == expected or (type(expected) == "table" and expected[cmd]) then
 		return true
@@ -1458,6 +1785,12 @@ local function CheckWorker(unitID, share, frame)
 			failedUntil[unitID] = failedUntil[unitID] or {}
 			failedUntil[unitID][key] = frame + FAILED_RETRY_FRAMES
 		end
+	elseif key:sub(1, 2) == "r#" then
+		-- Backup reclaim: its square is done (or the rest is out of reach).
+		-- The squares are only looked at again every few seconds, so don't
+		-- send it straight back.
+		failedUntil[unitID] = failedUntil[unitID] or {}
+		failedUntil[unitID][key] = frame + FAILED_RETRY_FRAMES
 	end
 	Unassign(unitID)
 	return true
@@ -1482,13 +1815,121 @@ local function IsCommander(unitDef)
 	return unitDef.customParams.commtype or unitDef.customParams.dynamic_comm
 end
 
+-- Whether a job is in progress as far as our metal goes. Our team's job:
+-- once it has a nanoframe or anyone's workers on it. An ally's: only while
+-- our workers are on it, as building it spends our metal - one only its own
+-- team builds doesn't compete with ours.
+local function JobStarted(job)
+	local ours = ourCount[job.key] or 0
+	if job.owner ~= spGetMyTeamID() then
+		return ours > 0
+	end
+	return job.unitID or job.others + ours > 0
+end
+
+-- How many large projects are in progress for us. Changes as UpdateWorkers
+-- assigns workers, so it is counted again whenever a worker changes job.
+local largeStarted = 0
+
+local function CountLargeStarted(jobs)
+	local count = 0
+	for j = 1, #jobs do
+		if jobs[j].large and JobStarted(jobs[j]) then
+			count = count + 1
+		end
+	end
+	return count
+end
+
+-- The largeConcurrentCost of starting a large project, or 0. Not part of
+-- JobBaseCost, as it changes with every other large project's workers.
+local function LargeStartCost(job)
+	if job.large and largeStarted > 0 and not JobStarted(job) then
+		return options.largeConcurrentCost.value * largeStarted
+	end
+	return 0
+end
+
+-- What a metal or energy building will make, per second: a mex its spot's
+-- metal, a wind generator the average wind (a tidal one its fixed output),
+-- anything else its energy output. Worked out once per job per update.
+local function JobOutput(job)
+	if job.output then
+		return job.output
+	end
+	local ud = UnitDefs[-job.cmd]
+	local cp = ud.customParams
+	local output = 0
+	if job.produces == "metal" then
+		local best, bestDistSq = nil, 64 * 64
+		local spots = WG.metalSpots or {}
+		for i = 1, #spots do
+			local distSq = DistanceSq(job.x, job.z, spots[i].x, spots[i].z)
+			if distSq < bestDistSq then
+				best, bestDistSq = spots[i], distSq
+			end
+		end
+		output = best and (best.metal or 0) * (tonumber(cp.metal_extractor_mult) or 1) or 0
+	elseif job.produces == "energy" then
+		if cp.windgen and spGetGroundHeight(job.x, job.z) > 0 then
+			output = ((Spring.GetGameRulesParam("WindMin") or 0) + (Spring.GetGameRulesParam("WindMax") or 0)) / 2
+		else
+			output = (ud.energyMake or 0) + (tonumber(cp.income_energy) or 0)
+		end
+	end
+	job.output = output
+	return output
+end
+
+-- The income still to come from our metal and energy projects in progress:
+-- those with a nanoframe or workers on them. A small one counts in full as
+-- soon as it's started, since it will be done soon; a large one (fusion,
+-- singularity, ...) only as far as it's built, since until then it doesn't
+-- stop us being short.
+local function ProjectedIncome(jobs)
+	local metal, energy = 0, 0
+	local me = spGetMyTeamID()
+	for j = 1, #jobs do
+		local job = jobs[j]
+		if (job.produces == "metal" or job.produces == "energy") and job.owner == me and JobStarted(job) then
+			local output = JobOutput(job) * (job.large and (job.progress or 0) or 1)
+			if job.produces == "metal" then
+				metal = metal + output
+			else
+				energy = energy + output
+			end
+		end
+	end
+	return metal, energy
+end
+
+-- The jobs of the last worker AI update, by key, for the worker log.
+local lastJobByKey = {}
+
 local function UpdateWorkers(share)
 	UpdateResources()
 	UpdateSplit()
 	dangerCache = {}
 	local frame = spGetGameFrame()
 	local jobs = CollectJobs(share, AverageBuildPower(), frame)
+	local jobByKey = {}
+	for j = 1, #jobs do
+		jobByKey[jobs[j].key] = jobs[j]
+	end
+	lastJobByKey = jobByKey
+	projectedMetal, projectedEnergy = ProjectedIncome(jobs)
+	UpdateNeeds()
+	baseCosts = {}
+	largeStarted = CountLargeStarted(jobs)
+	if options.debugCosts.value then
+		debugCosts = {}
+		for j = 1, #jobs do
+			local job = jobs[j]
+			debugCosts[j] = {job.x, job.y or spGetGroundHeight(job.x, job.z), job.z, SharedBaseCost(job) + LargeStartCost(job)}
+		end
+	end
 	for unitID in pairs(workers) do
+		local keyBefore = assignment[unitID]
 		if CheckWorker(unitID, share, frame) then
 			local unitDefID = spGetUnitDefID(unitID)
 			local ud = unitDefID and UnitDefs[unitDefID]
@@ -1509,7 +1950,14 @@ local function UpdateWorkers(share)
 					if not (failed and failed[job.key] and failed[job.key] > frame)
 							and not justStarted
 							and spFindUnitCmdDesc(unitID, JobCommand(job)) then
-						local cost = JobCost(wx, wz, speed, ud.buildDistance, job, currentKey, travelFactor)
+						local base
+						if job.key == currentKey then
+							base = JobBaseCost(job, currentKey)
+						else
+							base = SharedBaseCost(job)
+						end
+						local cost = TravelCost(wx, wz, speed, ud.buildDistance, job, travelFactor) + base
+							+ LargeStartCost(job)
 						if job.key == currentKey then
 							currentCost = cost
 						end
@@ -1533,17 +1981,34 @@ local function UpdateWorkers(share)
 				end
 			end
 		end
+		local keyAfter = assignment[unitID]
+		if keyAfter ~= keyBefore then
+			largeStarted = CountLargeStarted(jobs)
+			-- A metal or energy project gained or lost a worker: the incomes
+			-- to come, and so the needs, change for the next worker.
+			local before, after = keyBefore and jobByKey[keyBefore], keyAfter and jobByKey[keyAfter]
+			if (before and before.produces) or (after and after.produces) then
+				projectedMetal, projectedEnergy = ProjectedIncome(jobs)
+				UpdateNeeds()
+				baseCosts = {} -- every mex and energy job's cost depends on them
+			end
+		end
 	end
+	baseCosts = nil
 	SteerPriority()
 end
 
 --------------------------------------------------------------------------------
 -- Auto-built caretakers
 --------------------------------------------------------------------------------
--- While metal is high, queue a caretaker beside each (producing) factory that
--- has fewer than maxCaretakersPerFactory built or queued within caretaker
--- range, one at a time per factory. Placed on a ring around the factory,
--- within caretaker build range, and not on its exit side.
+-- Enough caretakers beside our (producing) factories for them and the
+-- factories to spend the units share of our metal income, or whatever of it
+-- our GBC workers can't spend, if more: each spends up to its build power in
+-- metal a second. As many are queued at once as we're short
+-- (rounded to the nearest), each beside the factory with the fewest built
+-- and queued, up to maxCaretakersPerFactory each.
+-- Placed on a ring around the factory, within caretaker build range, and not
+-- on its exit side.
 
 local caretakerDefID = UnitDefNames.staticcon and UnitDefNames.staticcon.id
 local CARETAKER_CHECK_SECONDS = 5
@@ -1573,17 +2038,18 @@ local function OwnCaretakerJobsNear(share, x, z, radius)
 	return count
 end
 
+-- Our caretakers within radius of a spot, as an array of unitIDs.
 local function CaretakersNear(x, z, radius)
 	local units = spGetUnitsInCylinder(x, z, radius, managedTeamID)
-	local count = 0
+	local caretakers = {}
 	if units then
 		for i = 1, #units do
 			if spGetUnitDefID(units[i]) == caretakerDefID then
-				count = count + 1
+				caretakers[#caretakers+1] = units[i]
 			end
 		end
 	end
-	return count
+	return caretakers
 end
 
 -- A free spot for a caretaker beside a factory, or nil.
@@ -1613,29 +2079,239 @@ local function CaretakerSpot(factoryID, share)
 	return nil
 end
 
+local CARETAKER_NEED_FULL = 2 -- caretakers short for the full caretaker need bonus
+
 local function QueueCaretakers(share)
-	if not (caretakerDefID and options.autoCaretakers.value and metalHigh > 0) then
+	caretakerNeed = 0
+	caretakerStats = {}
+	if not (caretakerDefID and options.autoCaretakers.value) then
 		return
 	end
-	local range = UnitDefs[caretakerDefID].buildDistance
+	local caretakerDef = UnitDefs[caretakerDefID]
+	local range = caretakerDef.buildDistance
+	local caretakerPower = math.max(1, caretakerDef.buildSpeed or 10)
+
+	-- The GBC workers' build power: what the economy side can spend at most.
+	-- Workers helping a factory are on the units side instead.
+	local workerPower, helpingPower = 0, 0
+	for unitID in pairs(workers) do
+		if not IsNanoframe(unitID) then
+			-- Workers only helping as a fallback (Help factories off) leave for
+			-- the first job that comes up, so they count as free workers, not
+			-- as standing in for caretakers.
+			if assignedSide[unitID] == "units" and options.assistFactories.value then
+				helpingPower = helpingPower + BuildPower(unitID)
+			else
+				workerPower = workerPower + BuildPower(unitID)
+			end
+		end
+	end
+
+	-- The build power the units side should have: the units share of our
+	-- income - or more, when the workers can't spend all of the economy share,
+	-- since the rest would only pile up. Only a factory can make more workers.
+	-- Building spends metal and energy about 1:1, so what build power can
+	-- spend is the lower of the two incomes: when energy is behind, more
+	-- caretakers would only stall.
+	-- Counting what's to come from mexes and energy under way (see
+	-- ProjectedIncome), so caretakers are started along with the mexes and
+	-- are ready when their income arrives.
+	local income = math.min(metalIncome + projectedMetal, energyIncome + projectedEnergy)
+	local target = math.max(income * (1 - options.econShare.value), income - workerPower)
+
+	-- What's already spending it: the factories, the caretakers beside them
+	-- (each counted once, even if beside two) and workers helping factories;
+	-- then caretakers still queued, as they will.
+	local power = helpingPower
+	local unfinishedPower = 0 -- of those caretakers, the ones still nanoframes
+	local counted = {}
+	local candidates = {}
 	for factoryID in pairs(factories) do
 		if options.autoCaretakersIdleFactories.value or spGetUnitIsBuilding(factoryID) then
+			power = power + BuildPower(factoryID)
 			local fx, _, fz = spGetUnitPosition(factoryID)
-			-- One at a time per factory: skip while one is still queued.
-			if fx and OwnCaretakerJobsNear(share, fx, fz, range) == 0
-					and CaretakersNear(fx, fz, range) < options.maxCaretakersPerFactory.value then
-				local x, y, z = CaretakerSpot(factoryID, share)
+			if fx then
+				local near = CaretakersNear(fx, fz, range)
+				for i = 1, #near do
+					if not counted[near[i]] then
+						counted[near[i]] = true
+						power = power + caretakerPower
+						if IsNanoframe(near[i]) then
+							unfinishedPower = unfinishedPower + caretakerPower
+						end
+					end
+				end
+				candidates[#candidates+1] = {factoryID = factoryID, x = fx, z = fz, count = #near}
+			end
+		end
+	end
+
+	-- How short we are of finished caretakers: queued and half-built ones
+	-- still need workers to build them.
+	local short = (target - (power - unfinishedPower)) / caretakerPower
+	caretakerNeed = math.max(0, math.min(1, short / CARETAKER_NEED_FULL))
+	caretakerStats = {target = target, have = power - unfinishedPower, workerPower = workerPower}
+
+	power = power + OwnCaretakerJobsNear(share, 0, 0, math.huge) * caretakerPower
+	-- Rounded to the nearest: half a caretaker short is enough to add one.
+	local toAdd = math.floor((target - power) / caretakerPower + 0.5)
+	if toAdd <= 0 then
+		return
+	end
+	-- As many at once as we're short, spread over the factories: each round
+	-- adds one beside the factory with the fewest (built and queued), up to
+	-- maxCaretakersPerFactory each.
+	for i = 1, #candidates do
+		candidates[i].count = candidates[i].count + OwnCaretakerJobsNear(share, candidates[i].x, candidates[i].z, range)
+	end
+	while toAdd > 0 do
+		table.sort(candidates, function(a, b) return a.count < b.count end)
+		local added = false
+		for i = 1, #candidates do
+			local candidate = candidates[i]
+			if candidate.count < options.maxCaretakersPerFactory.value then
+				local x, y, z = CaretakerSpot(candidate.factoryID, share)
 				if x then
 					share.Update({id = -caretakerDefID, x = x, y = y, z = z, h = 0})
+					candidate.count = candidate.count + 1
+					toAdd = toAdd - 1
+					added = true
+					break
 				end
 			end
+		end
+		if not added then
+			return -- every factory is full, or has no room left
 		end
 	end
 end
 
+-- One infolog line on the economy, for the debugEconLog option. Build power
+-- in metal a second: GBC workers by what they're on (mex, energy,
+-- production - caretakers and factories -, helping a factory, anything else,
+-- nothing), producing factories, and finished caretakers.
+local function LogEconomy()
+	local bp = {mex = 0, energy = 0, prod = 0, help = 0, other = 0, idle = 0}
+	local workerTotal = 0
+	for unitID in pairs(workers) do
+		if not IsNanoframe(unitID) then
+			local power = BuildPower(unitID)
+			workerTotal = workerTotal + power
+			local group
+			if not assignment[unitID] then
+				group = "idle"
+			elseif assignedSide[unitID] == "units" then
+				group = "help"
+			elseif assignedProduces[unitID] == "metal" then
+				group = "mex"
+			elseif assignedProduces[unitID] == "energy" then
+				group = "energy"
+			elseif assignedProduces[unitID] == "production" then
+				group = "prod"
+			else
+				group = "other"
+			end
+			bp[group] = bp[group] + power
+		end
+	end
+	local factoryPower = 0
+	for factoryID in pairs(factories) do
+		if spGetUnitIsBuilding(factoryID) then
+			factoryPower = factoryPower + BuildPower(factoryID)
+		end
+	end
+	local caretakers, caretakerPower = 0, 0
+	local units = spGetTeamUnits(managedTeamID) or {}
+	for i = 1, #units do
+		if spGetUnitDefID(units[i]) == caretakerDefID and not IsNanoframe(units[i]) then
+			caretakers = caretakers + 1
+			caretakerPower = caretakerPower + BuildPower(units[i])
+		end
+	end
+	local seconds = math.floor(spGetGameFrame() / 30)
+	spEcho(string.format("[GBC econ] %d:%02d"
+		.. " | metal %.1f in (+%.1f coming), %.1f wanted | energy %.1f in (+%.1f coming)"
+		.. " | need: metal %.2f energy %.2f, metal high %.2f, split %.2f (eco share %.2f)"
+		.. " | workers %.0f: mex %.0f energy %.0f prod %.0f help %.0f other %.0f idle %.0f"
+		.. " | factories %.0f, caretakers %d (%.0f)"
+		.. " | caretaker target %.1f, have %.1f, need %.2f",
+		seconds / 60, seconds % 60,
+		metalIncome, projectedMetal, metalPull, energyIncome, projectedEnergy,
+		metalNeed, energyNeed, metalHigh, splitImbalance, options.econShare.value,
+		workerTotal, bp.mex, bp.energy, bp.prod, bp.help, bp.other, bp.idle,
+		factoryPower, caretakers, caretakerPower,
+		caretakerStats.target or 0, caretakerStats.have or 0, caretakerNeed))
+end
+
+-- What a job is, in words, for the worker log.
+local function DescribeJob(job)
+	local what
+	if job.factoryAssist then
+		what = "help factory #" .. job.target
+	elseif job.backupReclaim then
+		what = "backup reclaim"
+	elseif job.cmd < 0 then
+		what = "build " .. UnitDefs[-job.cmd].name
+		if job.phase then
+			what = what .. " (" .. job.phase .. ")"
+		elseif job.progress then
+			what = what .. string.format(" (%d%%)", job.progress * 100)
+		end
+	else
+		local names = {[CMD_REPAIR] = "repair", [CMD_RECLAIM] = "reclaim", [CMD_RESURRECT] = "resurrect", [CMD_GUARD] = "guard"}
+		what = (names[job.cmd] or ("cmd " .. job.cmd)) .. (job.target and " target" or " area")
+		if job.terraform then
+			what = what .. " (terraform)"
+		end
+	end
+	if job.owner ~= spGetMyTeamID() then
+		what = what .. " [ally " .. job.owner .. "]"
+	end
+	return what
+end
+
+-- One infolog line per GBC worker, for the debugWorkerLog option: its job,
+-- the straight-line distance to it (less build range), the time that takes
+-- at the worker's speed, and the job's cost (travel as weighted, plus the
+-- rest).
+local function LogWorkers()
+	local seconds = math.floor(spGetGameFrame() / 30)
+	local stamp = string.format("[GBC worker] %d:%02d", seconds / 60, seconds % 60)
+	for unitID in pairs(workers) do
+		local unitDefID = spGetUnitDefID(unitID)
+		local ud = unitDefID and UnitDefs[unitDefID]
+		local name = string.format("#%d %s", unitID, ud and ud.name or "?")
+		local key = assignment[unitID]
+		local job = key and lastJobByKey[key]
+		local wx, _, wz = spGetUnitPosition(unitID)
+		if IsNanoframe(unitID) then
+			spEcho(stamp .. " " .. name .. ": unfinished")
+		elseif not key then
+			local cmd = spGetUnitCurrentCommand(unitID)
+			spEcho(stamp .. " " .. name .. ": " .. (cmd and ("own orders (cmd " .. cmd .. ")") or "idle"))
+		elseif not (job and wx and ud) then
+			spEcho(stamp .. " " .. name .. ": " .. key .. " (job gone)")
+		else
+			local dx, dz = wx - job.x, wz - job.z
+			local distance = math.max(0, math.sqrt(dx*dx + dz*dz) - ud.buildDistance - (job.r or 0))
+			local speed = ud.speed * (spGetUnitRulesParam(unitID, "totalStaticMoveSpeedChange") or 1)
+			local travelSeconds = speed > 0 and distance / speed or 0
+			local travelFactor = IsCommander(ud) and options.commanderTravelFactor.value or 1
+			local travel = TravelCost(wx, wz, speed, ud.buildDistance, job, travelFactor)
+			local base = JobBaseCost(job, key) + LargeStartCost(job)
+			spEcho(string.format("%s %s: %s | %.0f elmos, %.1fs away | cost %.1f = travel %.1f + rest %.1f",
+				stamp, name, DescribeJob(job), distance, travelSeconds, travel + base, travel, base))
+		end
+	end
+end
+
+local ECON_LOG_SECONDS = 10
+local econLogTimer = 0
+
 local updateTimer = 0
 function widget:Update(dt)
 	caretakerTimer = caretakerTimer + dt
+	econLogTimer = econLogTimer + dt
 	updateTimer = updateTimer + dt
 	if updateTimer < options.updateRate.value then
 		return
@@ -1647,11 +2323,21 @@ function widget:Update(dt)
 	end
 	-- Our own jobs are ours to keep tidy even when we don't lead the team.
 	CleanOwnJobs(share)
+	debugCosts = nil
 	if managedTeamID and options.workerAI.value then
 		UpdateWorkers(share)
 		if caretakerTimer >= CARETAKER_CHECK_SECONDS then
 			caretakerTimer = 0
 			QueueCaretakers(share)
+		end
+		if econLogTimer >= ECON_LOG_SECONDS then
+			econLogTimer = 0
+			if options.debugEconLog.value then
+				LogEconomy()
+			end
+			if options.debugWorkerLog.value then
+				LogWorkers()
+			end
 		end
 	end
 end
@@ -1694,6 +2380,23 @@ local workerCommands = {
 		action  = 'resurrect',
 		cursor  = 'Resurrect',
 		tooltip = 'Queue a GBC resurrect job.',
+	},
+}
+
+local areaMexCommands = {
+	{
+		id      = CMD_AREA_MEX,
+		name    = 'Mex',
+		action  = 'areamex',
+		cursor  = 'Mex',
+		tooltip = 'Area Mex: Click and drag to queue GBC mex jobs in an area.',
+	},
+	{
+		id      = CMD_AREA_TERRA_MEX,
+		name    = 'Terra Mex',
+		action  = 'areaterramex',
+		cursor  = 'Terramex',
+		tooltip = 'Area Terra Mex: Click and drag to queue terraformed GBC mex jobs in an area.',
 	},
 }
 
@@ -1762,6 +2465,28 @@ local function AddWorkerCommands(customCommands)
 		end
 	end
 
+	-- Area mex (cmd_mex_placement.lua), which hands each spot to
+	-- CommandNotifyMex below, when our workers can build a mex.
+	for buildDefID in pairs(buildDefIDs) do
+		if UnitDefs[buildDefID].customParams.ismex then
+			for i = 1, #areaMexCommands do
+				local command = areaMexCommands[i]
+				if not existing[command.id] then
+					customCommands[#customCommands+1] = {
+						id      = command.id,
+						type    = CMDTYPE.ICON_AREA,
+						name    = command.name,
+						action  = command.action,
+						cursor  = command.cursor,
+						tooltip = command.tooltip,
+					}
+					existing[command.id] = true
+				end
+			end
+			break
+		end
+	end
+
 	for buildDefID in pairs(buildDefIDs) do
 		local cmdID = -buildDefID
 		if not existing[cmdID] then
@@ -1783,6 +2508,26 @@ end
 --
 -- While GBC mode is on, also adds the Global Build Cancel area command,
 -- whatever is selected, so jobs can be removed with an army selected too.
+-- Economy/units split presets, as buttons on GBC mode's orders tab.
+local ECON_PRESETS = {
+	{cmd = CMD_GBC_ECO, share = 0.8, name = 'Eco', action = 'gbceco',
+		tooltip = 'Eco focus: spend 80% of build power on economy (mexes, energy, storage, pylons), 20% on units.'},
+	{cmd = CMD_GBC_BALANCED, share = 0.5, name = 'Balanced', action = 'gbcbalanced',
+		tooltip = 'Balanced: spend build power evenly between economy and units.'},
+	{cmd = CMD_GBC_ARMY, share = 0.2, name = 'Army', action = 'gbcarmy',
+		tooltip = 'Army focus: spend 80% of build power on units (factories and help for them), 20% on economy.'},
+}
+
+local function SetEconShare(share)
+	if WG.SetWidgetOption then
+		WG.SetWidgetOption(widget:GetInfo().name, options_path, 'econShare', share) -- saved like a menu change
+	else
+		options.econShare.value = share
+	end
+	Spring.ForceLayoutUpdate()
+	spEcho(string.format("GBC: %d%% economy, %d%% units", share * 100 + 0.5, (1 - share) * 100 + 0.5))
+end
+
 function widget:CommandsChanged()
 	local customCommands = widgetHandler.customCommands
 	local selectedUnits = spGetSelectedUnits()
@@ -1811,6 +2556,17 @@ function widget:CommandsChanged()
 			cursor  = 'Repair',
 			action  = 'globalbuildcancel',
 		}
+		-- The command panel highlights the one in use (GetEconPreset).
+		for i = 1, #ECON_PRESETS do
+			local preset = ECON_PRESETS[i]
+			customCommands[#customCommands+1] = {
+				id      = preset.cmd,
+				type    = CMDTYPE.ICON,
+				tooltip = preset.tooltip,
+				name    = preset.name,
+				action  = preset.action,
+			}
+		end
 		AddWorkerCommands(customCommands)
 	end
 end
@@ -1829,6 +2585,13 @@ function widget:CommandNotify(cmdID, params, opts)
 	if cmdID == CMD_GLOBAL_BUILD then
 		SetGlobalBuildState(params[1])
 		return true
+	end
+
+	for i = 1, #ECON_PRESETS do
+		if cmdID == ECON_PRESETS[i].cmd then
+			SetEconShare(ECON_PRESETS[i].share)
+			return true
+		end
 	end
 
 	-- Handled even if GBC mode was switched off while the command was on the
@@ -1891,6 +2654,16 @@ end
 
 function externalFunctions.Toggle()
 	SetActive(not active)
+end
+
+-- The command of the economy/units preset in use, or nil if the economy
+-- share was set to something else.
+function externalFunctions.GetEconPreset()
+	for i = 1, #ECON_PRESETS do
+		if math.abs(options.econShare.value - ECON_PRESETS[i].share) < 0.01 then
+			return ECON_PRESETS[i].cmd
+		end
+	end
 end
 
 -- The toggle's current hotkey, readable, or "" if it has none.
@@ -2105,14 +2878,20 @@ function widget:UnitTaken(unitID, unitDefID, oldTeam, newTeam)
 	end
 end
 
+-- Esc cancels an area removal in progress, otherwise closes GBC mode.
 function widget:KeyPress(key)
-	if active and dragX and key == KEYSYMS.ESCAPE then
-		StopDrag()
-		return true
+	if not (active and key == KEYSYMS.ESCAPE) then
+		return false
 	end
-	return false
+	if dragX then
+		StopDrag()
+	else
+		Dismiss()
+	end
+	return true
 end
 
+-- Right-drag removes jobs in a circle; a right-click closes GBC mode.
 function widget:MousePress(x, y, button)
 	if not active or button ~= 3 then
 		return false
@@ -2120,6 +2899,9 @@ function widget:MousePress(x, y, button)
 	local mx, mz = mousePos()
 	if mx then
 		dragX, dragZ, dragR = mx, mz, 0
+		dragScreenX, dragScreenY = x, y
+	else
+		Dismiss() -- off the map there's nothing to drag over
 	end
 	return true
 end
@@ -2137,16 +2919,34 @@ function widget:MouseRelease(x, y, button)
 	if not dragX then
 		return false
 	end
-	RemoveJobsInCircle(dragX, dragZ, dragR)
-	StopDrag()
+	local dx, dy = x - dragScreenX, y - dragScreenY
+	if dx*dx + dy*dy <= CLICK_MAX_MOVE_SQ then
+		Dismiss()
+	else
+		RemoveJobsInCircle(dragX, dragZ, dragR)
+		StopDrag()
+	end
 	return true
 end
+
+local DEBUG_COST_HEIGHT = 40 -- elmos above the job
+local DEBUG_COST_SIZE = 16
 
 function widget:DrawWorld()
 	if dragX then
 		gl.Color(1, 0.3, 0.3, 0.3)
 		gl.DrawGroundCircle(dragX, spGetGroundHeight(dragX, dragZ), dragZ, dragR, 32)
 		gl.Color(1, 1, 1, 1)
+	end
+	if debugCosts and options.debugCosts.value and not Spring.IsGUIHidden() then
+		for i = 1, #debugCosts do
+			local entry = debugCosts[i]
+			gl.PushMatrix()
+			gl.Translate(entry[1], entry[2] + DEBUG_COST_HEIGHT, entry[3])
+			gl.Billboard()
+			gl.Text(string.format("%.1f", entry[4]), 0, 0, DEBUG_COST_SIZE, "co")
+			gl.PopMatrix()
+		end
 	end
 end
 

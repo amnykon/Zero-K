@@ -131,10 +131,10 @@ local SpotBlocked = NEVER_BLOCKED
 
 -- Global Build Command (unit_global_build_command.lua): while its GBC mode is on,
 -- the grid is queued as GBC jobs for the GBC workers instead of being ordered to
--- the selected constructors.
+-- the selected constructors - or, pre-game, instead of the initial queue.
 local function GBCActive()
 	local gbc = WG.GlobalBuildCommandV2
-	return (not pregame) and gbc and gbc.IsActive() and WG.GlobalBuildQueueShare and true or false
+	return gbc and gbc.IsActive() and WG.GlobalBuildQueueShare and true or false
 end
 
 -- The reach test for the builders the grid is for: the GBC workers in GBC mode
@@ -525,7 +525,7 @@ local EMPTY_TABLE = {}
 -- How many structures we may still queue. Pre-game the initial queue has a hard
 -- cap (MAX_QUEUE); in-game there is no such limit.
 local function buildLimit()
-	if not pregame then
+	if not pregame or GBCActive() then
 		return math.huge
 	end
 	-- Pre-game we always append to the initial queue, so the room left is the cap
@@ -735,6 +735,34 @@ end
 local function orderPylonsToBuild()
 	local a,c,m,s = spGetModKeyState()
 
+	-- GBC mode (pre-game too): queue the plan as GBC jobs (whatever is selected) and let the GBC
+	-- worker AI hand them out. GBC levels a spot that needs it itself, given the
+	-- height (elevation), and helps finish ally nanoframes as repair jobs.
+	if GBCActive() then
+		local gbc = WG.GlobalBuildCommandV2
+		local facing = Spring.GetBuildFacing()
+		for index = 1, extraBuildCount do
+			if not SpotBlocked(extraBuildSiteX[index], extraBuildSiteZ[index]) then
+				local x, z = extraBuildX[index], extraBuildZ[index]
+				gbc.QueueBuild(-extraBuildDefID[index], x, spGetGroundHeight(x, z), z, facing)
+			end
+		end
+		local ordered = orderBuildItemsByPath(cmdCenterX, cmdCenterZ)
+		for k = 1, #ordered do
+			local index = ordered[k]
+			local x = pylonsToBuildX[index]
+			local z = pylonsToBuildZ[index]
+			local repairID = pylonsToBuildRepair[index]
+			if repairID then
+				gbc.QueueRepair(repairID)
+			else
+				local terraH = options.autoTerraform.value and pylonsToBuildTerraform[index] or nil
+				gbc.QueueBuild(-pylonsToBuildDefID[index], x, terraH or spGetGroundHeight(x, z), z, facing, terraH)
+			end
+		end
+		return
+	end
+
 	-- Pre-game: route through the initial build queue and respect its cap.
 	if pregame then
 		if not WG.InitialQueueHandleCommand then
@@ -774,33 +802,6 @@ local function orderPylonsToBuild()
 		return
 	end
 
-	-- GBC mode: queue the plan as GBC jobs (whatever is selected) and let the GBC
-	-- worker AI hand them out. GBC levels a spot that needs it itself, given the
-	-- height (elevation), and helps finish ally nanoframes as repair jobs.
-	if GBCActive() then
-		local gbc = WG.GlobalBuildCommandV2
-		local facing = Spring.GetBuildFacing()
-		for index = 1, extraBuildCount do
-			if not SpotBlocked(extraBuildSiteX[index], extraBuildSiteZ[index]) then
-				local x, z = extraBuildX[index], extraBuildZ[index]
-				gbc.QueueBuild(-extraBuildDefID[index], x, spGetGroundHeight(x, z), z, facing)
-			end
-		end
-		local ordered = orderBuildItemsByPath(cmdCenterX, cmdCenterZ)
-		for k = 1, #ordered do
-			local index = ordered[k]
-			local x = pylonsToBuildX[index]
-			local z = pylonsToBuildZ[index]
-			local repairID = pylonsToBuildRepair[index]
-			if repairID then
-				gbc.QueueRepair(repairID)
-			else
-				local terraH = options.autoTerraform.value and pylonsToBuildTerraform[index] or nil
-				gbc.QueueBuild(-pylonsToBuildDefID[index], x, terraH or spGetGroundHeight(x, z), z, facing, terraH)
-			end
-		end
-		return
-	end
 
 	if not WG.CommandInsert then
 		return -- the command-insert provider widget isn't available
@@ -1445,11 +1446,34 @@ end
 -- drag without shift or space replaces the selection's queues, so their buildings
 -- are ignored then (another con's copy of the same site still counts). Only
 -- structures with a pylon range are kept.
+-- Every allied GBC build job with a pylon range, into queuedBuildings: in GBC
+-- mode they're already taken care of, so they're skip-anchors.
+local function gatherGBCJobs()
+	local share = WG.GlobalBuildQueueShare
+	local teams = Spring.GetTeamList(spGetMyAllyTeamID())
+	for t = 1, #teams do
+		local teamID = teams[t]
+		local jobIds = share.GetJobIds(teamID)
+		for j = 1, #jobIds do
+			local jobCmd = share.GetCmdId(teamID, jobIds[j])
+			local range = jobCmd and jobCmd < 0 and pylonRange[-jobCmd]
+			if range then
+				queuedBuildings[#queuedBuildings + 1] = {
+					defID = -jobCmd, x = share.GetX(teamID, jobIds[j]), z = share.GetZ(teamID, jobIds[j]), range = range,
+				}
+			end
+		end
+	end
+end
+
 local function gatherQueuedBuildings()
 	queuedBuildings = {}
 	queuedByOthers = {}
 
 	if pregame then
+		if GBCActive() then
+			gatherGBCJobs()
+		end
 		local queue = WG.InitialQueueGetQueue and WG.InitialQueueGetQueue()
 		if queue then
 			for i = 1, #queue do
@@ -1470,21 +1494,7 @@ local function gatherQueuedBuildings()
 	-- and every allied GBC build job, are already taken care of: all are skip-anchors.
 	local gbc = GBCActive()
 	if gbc then
-		local share = WG.GlobalBuildQueueShare
-		local teams = Spring.GetTeamList(spGetMyAllyTeamID())
-		for t = 1, #teams do
-			local teamID = teams[t]
-			local jobIds = share.GetJobIds(teamID)
-			for j = 1, #jobIds do
-				local jobCmd = share.GetCmdId(teamID, jobIds[j])
-				local range = jobCmd and jobCmd < 0 and pylonRange[-jobCmd]
-				if range then
-					queuedBuildings[#queuedBuildings + 1] = {
-						defID = -jobCmd, x = share.GetX(teamID, jobIds[j]), z = share.GetZ(teamID, jobIds[j]), range = range,
-					}
-				end
-			end
-		end
+		gatherGBCJobs()
 	end
 
 	local _, _, meta, shift = spGetModKeyState()

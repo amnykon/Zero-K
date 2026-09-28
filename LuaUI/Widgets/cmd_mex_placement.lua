@@ -592,6 +592,25 @@ local function HandleAreaMex(cmdID, cx, cy, cz, cr, cmdOpts, singleSpot)
 		end
 	end
 
+	-- Global Build Command mode takes every spot as a GBC job (CommandNotifyMex
+	-- below), so no builder needs to be selected: its workers stand in for the
+	-- selection, for where to start the route and which spots they can reach.
+	local gbc = WG.GlobalBuildCommandV2
+	local gbcMode = gbc and gbc.IsActive() and WG.GlobalBuildCommand and true or false
+	local reachUnits = units
+	if gbcMode and us == 0 and not pregame then
+		reachUnits = gbc.GetWorkers()
+		for i = 1, #reachUnits do
+			local x, _, z = spGetUnitPosition(reachUnits[i])
+			if x then
+				ux, uz, us = ux + x, uz + z, us + 1
+			end
+		end
+		if us == 0 then
+			ux, uz, us = cx, cz, 1 -- no workers yet: start from the area's centre
+		end
+	end
+
 	if pregame then
 		if WG.InitialQueueGetTail and WG.InitialQueueGetTail() then
 			aveX, aveZ = WG.InitialQueueGetTail()
@@ -628,7 +647,10 @@ local function HandleAreaMex(cmdID, cx, cy, cz, cr, cmdOpts, singleSpot)
 
 	-- Skip spots the player flagged as out of reach of these builders (cmd_spot_reach_flags.lua),
 	-- unless the player picked this one spot directly.
-	local spotBlocked = not singleSpot and WG.SpotReach and WG.SpotReach.GetBlockedTest(units)
+	-- (With no builders to test, as in GBC mode before it has any workers, every
+	-- spot is kept.)
+	local spotBlocked = not singleSpot and WG.SpotReach and (pregame or #reachUnits > 0)
+		and WG.SpotReach.GetBlockedTest(reachUnits)
 
 	for i = 1, #WG.metalSpots do
 		local mex = WG.metalSpots[i]
@@ -690,7 +712,9 @@ local function HandleAreaMex(cmdID, cx, cy, cz, cr, cmdOpts, singleSpot)
 		-- If ctrl or alt is held and the first metal spot is blocked by a mex, then the mex command is blocked
 		-- and the remaining commands are issused with shift. This causes the area mex command to act as if shift
 		-- where hold even when it is not. I do not know why this issue is absent when no modkey are held.
-		if makeMexEnergy and not (cmdOpts.shift or cmdOpts.meta) then
+		-- (Not in GBC mode, where the spots become GBC jobs: that would stop the
+		-- selection, or pre-game clear the initial queue, for nothing.)
+		if makeMexEnergy and not (cmdOpts.shift or cmdOpts.meta) and not gbcMode then
 			commandArrayToIssue[#commandArrayToIssue+1] = {CMD.STOP, {} }
 		end
 		

@@ -62,6 +62,12 @@ local tooltipsAlternate = {
 	FIRE_STATE = "Fire State (_STATE_)\n  Sets when a unit will automatically shoot.",
 }
 
+-- Whether a Global Build Command economy/units preset button is the one in use.
+local function GBCPresetInUse(cmdID)
+	local gbc = WG.GlobalBuildCommandV2
+	return gbc and gbc.GetEconPreset and gbc.GetEconPreset() == cmdID
+end
+
 local commandDisplayConfig = {
 	[CMD.ATTACK] = { texture = imageDir .. 'Bold/attack.png', tooltip = "Force Fire: Shoot at a particular target. Units will move to find a clear shot."},
 	[CMD.STOP] = { texture = imageDir .. 'Bold/cancel.png', tooltip = "Stop: Halt the unit and clear its command queue."},
@@ -116,6 +122,10 @@ local commandDisplayConfig = {
 	[CMD_UPGRADE_STOP] = { texture = imageDir .. 'Bold/cancelupgrade.png'},
 	[CMD_STOP_PRODUCTION] = { texture = imageDir .. 'Bold/stopbuild.png'},
 	[CMD_GBCANCEL] = { texture = imageDir .. 'Bold/stopbuild.png'},
+	-- Economy/units split presets: drawName shows the label, highlightFunc marks the one in use.
+	[CMD_GBC_ECO] = { texture = imageDir .. 'Bold/mex.png', drawName = true, highlightFunc = GBCPresetInUse},
+	[CMD_GBC_BALANCED] = { texture = imageDir .. 'Bold/build.png', drawName = true, highlightFunc = GBCPresetInUse},
+	[CMD_GBC_ARMY] = { texture = imageDir .. 'Bold/fight.png', drawName = true, highlightFunc = GBCPresetInUse},
 
 	[CMD_RECALL_DRONES] = {texture = imageDir .. 'Bold/recall_drones.png'},
 	
@@ -690,6 +700,9 @@ local instantCommands = {
 	[CMD_MORPH_UPGRADE_INTERNAL] = true,
 	[CMD_UPGRADE_STOP] = true,
 	[CMD_STOP_PRODUCTION] = true,
+	[CMD_GBC_ECO] = true,
+	[CMD_GBC_BALANCED] = true,
+	[CMD_GBC_ARMY] = true,
 	[CMD_RESETFIRE] = true,
 	[CMD_RESETMOVE] = true,
 }

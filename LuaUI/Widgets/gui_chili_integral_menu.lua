@@ -74,6 +74,9 @@ local smallStateWidth, smallStateHeight = 5, 3.4
 
 local SELECT_BUTTON_COLOR = {0.98, 0.48, 0.26, 0.85}
 local SELECT_BUTTON_FOCUS_COLOR = {0.98, 0.48, 0.26, 0.85}
+-- A command whose displayConfig.highlightFunc says so, eg. the preset in use.
+local HIGHLIGHT_BUTTON_COLOR = {0.35, 0.75, 0.35, 0.85}
+local HIGHLIGHT_BUTTON_FOCUS_COLOR = {0.45, 0.85, 0.45, 0.85}
 local BUTTON_DISABLE_COLOR = {0.1, 0.1, 0.1, 0.85}
 local BUTTON_DISABLE_FOCUS_COLOR = {0.1, 0.1, 0.1, 0.85}
 
@@ -1252,6 +1255,7 @@ local function GetButton(parent, name, selectionIndex, x, y, xStr, yStr, width, 
 	local queueCount
 	local isDisabled = false
 	local isSelected = false
+	local isHighlighted = false
 	local isQueueButton = buttonLayout.queueButton
 	local hotkeyText
 	local keyToShowWhenVisible
@@ -1478,8 +1482,8 @@ local function GetButton(parent, name, selectionIndex, x, y, xStr, yStr, width, 
 			externalFunctionsAndData.ClearGridHotkey()
 		else
 			if not buttonLayout.invisibleButton then
-				button.backgroundColor = BUTTON_COLOR
-				button.focusColor = BUTTON_FOCUS_COLOR
+				button.backgroundColor = isHighlighted and HIGHLIGHT_BUTTON_COLOR or BUTTON_COLOR
+				button.focusColor = isHighlighted and HIGHLIGHT_BUTTON_FOCUS_COLOR or BUTTON_FOCUS_COLOR
 				button.borderColor = BUTTON_BORDER_COLOR
 			end
 			image.color = {1, 1, 1, 1}
@@ -1648,10 +1652,28 @@ local function GetButton(parent, name, selectionIndex, x, y, xStr, yStr, width, 
 		if isSelected then
 			button.backgroundColor = SELECT_BUTTON_COLOR
 			button.focusColor = SELECT_BUTTON_FOCUS_COLOR
+		elseif isHighlighted then
+			button.backgroundColor = HIGHLIGHT_BUTTON_COLOR
+			button.focusColor = HIGHLIGHT_BUTTON_FOCUS_COLOR
 		else
 			button.backgroundColor = BUTTON_COLOR
 			button.focusColor = BUTTON_FOCUS_COLOR
 		end
+		button:Invalidate()
+	end
+
+	-- Highlighted: a lasting mark (below selection and disabled) for a
+	-- command whose displayConfig.highlightFunc returns true.
+	local function SetHighlighted(newIsHighlighted)
+		if isHighlighted == newIsHighlighted then
+			return
+		end
+		isHighlighted = newIsHighlighted
+		if isSelected or isDisabled or buttonLayout.invisibleButton then
+			return -- takes effect once it is neither
+		end
+		button.backgroundColor = isHighlighted and HIGHLIGHT_BUTTON_COLOR or BUTTON_COLOR
+		button.focusColor = isHighlighted and HIGHLIGHT_BUTTON_FOCUS_COLOR or BUTTON_FOCUS_COLOR
 		button:Invalidate()
 	end
 	
@@ -1673,6 +1695,10 @@ local function GetButton(parent, name, selectionIndex, x, y, xStr, yStr, width, 
 		
 		externalFunctionsAndData.SetSelection(false)
 		externalFunctionsAndData.SetBuildQueueCount(nil)
+		
+		local highlightConfig = command and GetDisplayConfig(newCmdID, command)
+		SetHighlighted((highlightConfig and highlightConfig.highlightFunc
+			and highlightConfig.highlightFunc(newCmdID, command)) and true or false)
 		
 		-- Update stockpile progress
 		if command and DRAW_NAME_COMMANDS[command.id] and command.name then
