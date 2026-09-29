@@ -65,22 +65,16 @@ VFS.Include("LuaRules/Configs/customcmds.h.lua")
 VFS.Include("LuaRules/Configs/constants.lua") -- HIDDEN_STORAGE
 
 local spGetMouseState     = Spring.GetMouseState
-local spGetActiveCommand  = Spring.GetActiveCommand
-local spTraceScreenRay    = Spring.TraceScreenRay
 local spGetGroundHeight   = Spring.GetGroundHeight
 local spGetUnitPosition   = Spring.GetUnitPosition
-local spGetFeaturePosition = Spring.GetFeaturePosition
 local spEcho              = Spring.Echo
 local spGetMyTeamID       = Spring.GetMyTeamID
-local spGetMyPlayerID     = Spring.GetMyPlayerID
-local spGetTeamInfo       = Spring.GetTeamInfo
 local spGetSpectatingState = Spring.GetSpectatingState
 local spGetTeamUnits      = Spring.GetTeamUnits
 local spGetUnitDefID      = Spring.GetUnitDefID
 local spGetSelectedUnits  = Spring.GetSelectedUnits
 local spGetUnitTeam       = Spring.GetUnitTeam
 local spGetUnitRulesParam = Spring.GetUnitRulesParam
-local spGetUnitCmdDescs   = Spring.GetUnitCmdDescs
 local spGiveOrderToUnit   = Spring.GiveOrderToUnit
 local spGetUnitCurrentCommand = Spring.GetUnitCurrentCommand
 local spFindUnitCmdDesc   = Spring.FindUnitCmdDesc
@@ -91,17 +85,11 @@ local spValidUnitID       = Spring.ValidUnitID
 local spValidFeatureID    = Spring.ValidFeatureID
 local spTestBuildOrder    = Spring.TestBuildOrder
 local spGetGameFrame      = Spring.GetGameFrame
-local spGetPlayerList     = Spring.GetPlayerList
-local spGetTeamList       = Spring.GetTeamList
-local spGetPlayerInfo     = Spring.GetPlayerInfo
-local spGetMyAllyTeamID   = Spring.GetMyAllyTeamID
 local spAreTeamsAllied    = Spring.AreTeamsAllied
 local spGetTeamResources  = Spring.GetTeamResources
 local spGetUnitIsBuilding = Spring.GetUnitIsBuilding
 local spGetUnitsInCylinder = Spring.GetUnitsInCylinder
 local spIsUnitAllied      = Spring.IsUnitAllied
-local spGetUnitBuildFacing = Spring.GetUnitBuildFacing
-local spPos2BuildPos      = Spring.Pos2BuildPos
 
 local CMD_REPAIR    = CMD.REPAIR
 local CMD_RECLAIM   = CMD.RECLAIM
@@ -352,7 +340,7 @@ end
 
 local function mousePos()
 	local mx, my = spGetMouseState()
-	local _, pos = spTraceScreenRay(mx, my, true)
+	local _, pos = Spring.TraceScreenRay(mx, my, true)
 	if pos then
 		return pos[1], pos[3]
 	end
@@ -373,7 +361,7 @@ end
 -- Close GBC mode and drop any armed command with it, like closing the missile
 -- launcher, so the next click doesn't place an ordinary order by surprise.
 local function Dismiss()
-	if spGetActiveCommand() then
+	if Spring.GetActiveCommand() then
 		Spring.SetActiveCommand(nil)
 	end
 	SetActive(false)
@@ -415,7 +403,7 @@ options_order = {
 	'metalNeedBonus', 'energyNeedBonus', 'incomeBalanceBand', 'productionNeedBonus',
 	'assistFactories', 'factoryFallback', 'factoryFallbackCost', 'econShare', 'splitWeight', 'factoryAssistPreferred', 'factoryAssistCost', 'factoryAssistLowMetalCost',
 	'backupReclaim', 'backupReclaimCost', 'steerPriority',
-	'dangerRadius', 'dangerPerMetal', 'dangerMax', 'dangerAllyMultiplier', 'dangerDefenceMultiplier', 'dangerRadarDotMetal',
+	'dangerRadius', 'dangerPenalty', 'dangerRadarDotMetal',
 	'autoCaretakers', 'autoCaretakersIdleFactories', 'maxCaretakersPerFactory', 'caretakerNeedBonus',
 	'lowPriorityCost', 'highPriorityDiscount',
 	'debugCosts', 'debugDanger', 'debugEconLog', 'debugWorkerLog',
@@ -536,7 +524,7 @@ options = {
 		path = COSTS_PATH,
 	},
 	metalNeedBonus = CostOption('Metal need bonus',
-		'Taken off building mexes, scaled by how much more metal is needed: metal is low, metal income is behind energy income, or build power wants more than comes in (unless energy income is the one behind).', 15),
+		'Taken off building mexes, scaled by how much more metal is needed: metal is low, metal income is behind energy income, or build power wants more than comes in (unless energy income is the one behind). Never while metal is piling up.', 15),
 	energyNeedBonus = CostOption('Energy need bonus',
 		'Taken off building energy (solar, wind, fusion, geothermal, singularity), scaled by how much more energy is needed: energy is low, energy income is behind metal income, or build power wants more than comes in (unless metal income is the one behind).', 15),
 	incomeBalanceBand = {
@@ -601,30 +589,12 @@ options = {
 	},
 	dangerRadius = {
 		name = 'Danger radius (elmos)',
-		desc = 'Units within this distance of a job count towards its danger.',
+		desc = 'Armed units within this distance of a job count towards its danger (allied defences only if they can reach the job).',
 		type = 'number', min = 100, max = 6000, step = 50, value = 2000,
 		path = COSTS_PATH,
 	},
-	dangerPerMetal = {
-		name = 'Danger cost per metal (seconds)',
-		desc = 'A job\'s danger, in metal, is: armed enemy units\' metal, each scaled from 1 at the job down to 0 at the danger radius; minus allied armed units\' metal times the ally multiplier; minus allied defences\' metal times the defence multiplier (a defence job counts itself); and never below 0. This converts it to seconds of cost.',
-		type = 'number', min = 0, max = 1, step = 0.01, value = 0.1,
-		path = COSTS_PATH,
-	},
-	dangerMax = CostOption('Danger cost: maximum',
-		'The most danger can add to a job\'s cost.', 60, 300),
-	dangerAllyMultiplier = {
-		name = 'Danger: ally unit multiplier',
-		desc = 'How much each metal of allied armed units near a job offsets enemy danger. Unarmed and unfinished units don\'t count.',
-		type = 'number', min = 0, max = 5, step = 0.1, value = 1,
-		path = COSTS_PATH,
-	},
-	dangerDefenceMultiplier = {
-		name = 'Danger: defence multiplier',
-		desc = 'How much each metal of allied defences (armed buildings) near a job offsets enemy danger. A defence job counts its own metal too, since building it makes the spot safer.',
-		type = 'number', min = 0, max = 5, step = 0.1, value = 1,
-		path = COSTS_PATH,
-	},
+	dangerPenalty = CostOption('Danger penalty',
+		'Added to a job\'s cost whenever the metal of armed enemy units within the danger radius is more than that of allied armed units there and allied defences that can reach it (a defence job counts itself): so workers clear out of a raid\'s path before it arrives. It doesn\'t grow with the difference. An armed worker (a commander, a Welder) counts its own metal on the allied side too.', 30, 120),
 	dangerRadarDotMetal = {
 		name = 'Danger: unidentified radar dot (metal)',
 		desc = 'How much metal an enemy radar dot counts as, when its type isn\'t known.',
@@ -633,7 +603,7 @@ options = {
 	},
 	autoCaretakers = {
 		name = 'Auto-build caretakers',
-		desc = 'Queue caretakers beside your producing factories until they and the factories can spend the units share of your metal income (see Economy vs units) - or more, when your GBC workers\' build power can\'t spend all of the economy share, so metal doesn\'t pile up. Each spends up to its build power in metal a second. They go beside the factory with the fewest first, and are ordinary GBC jobs: shown, and removable like any other.',
+		desc = 'Queue caretakers beside your producing factories until they and the factories can spend the units share of your metal income (see Economy vs units) - or more, when your GBC workers\' build power can\'t spend all of the economy share, so metal doesn\'t pile up. Each spends up to its build power in metal a second. While metal is piling up anyway, more are added to spend what goes unspent. They go beside the factory with the fewest first, and are ordinary GBC jobs: shown, and removable like any other.',
 		type = 'bool',
 		value = true,
 		noHotkey = true,
@@ -731,8 +701,8 @@ local function GetManagedTeamID()
 		return nil
 	end
 	local teamID = spGetMyTeamID()
-	local _, leaderID = spGetTeamInfo(teamID, false)
-	if leaderID ~= spGetMyPlayerID() then
+	local _, leaderID = Spring.GetTeamInfo(teamID, false)
+	if leaderID ~= Spring.GetMyPlayerID() then
 		return nil
 	end
 	return teamID
@@ -838,9 +808,10 @@ end
 --   - resource need: mexes get cheaper the lower metal is, energy the lower
 --     energy is, and caretakers, factories and helping factories the higher
 --     metal is (not enough build power to spend it).
---   - danger: armed enemies' metal near a job (scaled down with distance),
---     less allied armed units' and defences' metal (a defence job counts
---     itself), never below 0, converted to seconds.
+--   - danger: a flat penalty whenever armed enemies' metal near a job is
+--     more than allied armed units' metal and that of the defences that
+--     can reach it (a defence job counts itself, an armed worker - a
+--     commander, a Welder - its own metal).
 --   - economy vs units: workers can also help (guard) our producing
 --     factories. Economy jobs (mexes, energy, storage, pylons) get cheaper
 --     and helping factories dearer while economy is behind its share of build
@@ -1035,8 +1006,16 @@ local function BuildCategory(unitDef)
 	return nil, storage or (cp.pylonrange ~= nil)
 end
 
+-- Shields don't count: a Convict or an Aegis can't fight off a raid.
 local function IsArmed(unitDef)
-	return unitDef.weapons and #unitDef.weapons > 0
+	local weapons = unitDef.weapons
+	for i = 1, #(weapons or {}) do
+		local weaponDef = WeaponDefs[weapons[i].weaponDef]
+		if weaponDef and weaponDef.type ~= "Shield" then
+			return true
+		end
+	end
+	return false
 end
 
 -- Whether a building is a defence: armed, and not a large project (so not a
@@ -1073,13 +1052,16 @@ local function DangerSums(x, z)
 				if not ud then
 					enemy = enemy + options.dangerRadarDotMetal.value
 				elseif IsArmed(ud) and not IsNanoframe(unitID) then
-					local ux, _, uz = spGetUnitPosition(unitID)
-					local falloff = ux and math.max(0, 1 - math.sqrt(DistanceSq(x, z, ux, uz)) / radius) or 1
-					enemy = enemy + (ud.metalCost or 0) * falloff
+					enemy = enemy + (ud.metalCost or 0)
 				end
 			elseif ud and IsArmed(ud) and not IsNanoframe(unitID) then
 				if ud.isImmobile then
-					defence = defence + (ud.metalCost or 0)
+					-- A defence can't move to help: only where it can reach.
+					local ux, _, uz = spGetUnitPosition(unitID)
+					local range = ud.maxWeaponRange or 0
+					if ux and DistanceSq(x, z, ux, uz) <= range * range then
+						defence = defence + (ud.metalCost or 0)
+					end
 				else
 					allied = allied + (ud.metalCost or 0)
 				end
@@ -1089,9 +1071,9 @@ local function DangerSums(x, z)
 	return enemy, allied, defence
 end
 
--- A spot's danger, in metal (see the dangerPerMetal option): armed enemies'
--- metal scaled down with distance, less allied armed units' and defences'
--- metal, never below 0. ownDefenceMetal is a defence job's own metal.
+-- A spot's danger, in metal: armed enemies' metal less allied armed units'
+-- and reaching defences' metal, never below 0. ownDefenceMetal is a defence
+-- job's own metal.
 local function DangerAt(x, z, ownDefenceMetal)
 	local cx, cz = math.floor(x / DANGER_CELL), math.floor(z / DANGER_CELL)
 	local cellKey = cx .. "," .. cz
@@ -1101,9 +1083,14 @@ local function DangerAt(x, z, ownDefenceMetal)
 		sums = {enemy, allied, defence}
 		dangerCache[cellKey] = sums
 	end
-	return math.max(0, sums[1]
-		- sums[2] * options.dangerAllyMultiplier.value
-		- (sums[3] + (ownDefenceMetal or 0)) * options.dangerDefenceMultiplier.value)
+	return math.max(0, sums[1] - sums[2] - sums[3] - (ownDefenceMetal or 0))
+end
+
+-- What a spot's danger (DangerAt) adds to a job's cost: the flat
+-- dangerPenalty whenever it is more than ownMetal, the metal an armed worker
+-- brings with it (0 for an unarmed one).
+local function DangerCost(danger, ownMetal)
+	return danger > (ownMetal or 0) and options.dangerPenalty.value or 0
 end
 
 -- Every danger square on the map, for the debugDanger option. Fills
@@ -1117,7 +1104,7 @@ local function CollectDebugDanger()
 			local sums = dangerCache[cx .. "," .. cz]
 			debugDanger[#debugDanger + 1] = {
 				x, spGetGroundHeight(x, z), z,
-				danger, math.min(options.dangerMax.value, danger * options.dangerPerMetal.value),
+				danger, DangerCost(danger),
 				sums[1], sums[2], sums[3],
 			}
 		end
@@ -1194,7 +1181,7 @@ local function CollectJobs(share, avgBuildPower, frame)
 	local stillWaiting = {}
 	-- Every team on our side: our own (which, with commshare, holds our
 	-- teammates' jobs too) and our allies'.
-	local teams = spGetTeamList(spGetMyAllyTeamID())
+	local teams = Spring.GetTeamList(Spring.GetMyAllyTeamID())
 	for i = 1, #teams do
 		local owner = teams[i]
 		do
@@ -1548,7 +1535,9 @@ local function UpdateNeeds()
 	-- Build power wanting more than comes in calls for more of both - evenly
 	-- while the incomes are about even, so neither pulls workers off the
 	-- other - less of whichever income is ahead, and more of the one behind.
-	metalNeed = math.max(metalLow, metalShort * (1 - energyBehind), metalBehind)
+	-- None while metal is piling up, though: more mexes would only add to
+	-- what goes to waste, however far metal income is behind energy.
+	metalNeed = math.max(metalLow, metalShort * (1 - energyBehind), metalBehind) * (1 - metalHigh)
 	energyNeed = math.max(energyLow, metalShort * (1 - metalBehind), energyBehind)
 end
 
@@ -1592,7 +1581,7 @@ end
 -- How short the units side is of the caretakers it should have, 0 to 1,
 -- counting only those built (see QueueCaretakers), for the caretaker need
 -- bonus. Set every caretaker check.
-local CARETAKER_DEF_ID = UnitDefNames.staticcon and UnitDefNames.staticcon.id
+local caretakerDefID = UnitDefNames.staticcon and UnitDefNames.staticcon.id
 local caretakerNeed = 0
 -- The last caretaker check's figures, for the economy log.
 local caretakerStats = {}
@@ -1657,13 +1646,10 @@ local function JobBaseCost(job, currentKey)
 
 	-- Our caretakers, while we're short of them: brings a worker back to base
 	-- to build one rather than keeping one parked there.
-	if needed and job.cmd == -CARETAKER_DEF_ID and job.owner == spGetMyTeamID() then
+	if needed and job.cmd == -caretakerDefID and job.owner == spGetMyTeamID() then
 		cost = cost - options.caretakerNeedBonus.value * caretakerNeed
 	end
 
-	if job.danger > 0 then
-		cost = cost + math.min(options.dangerMax.value, job.danger * options.dangerPerMetal.value)
-	end
 
 	-- The economy/units steering: a cost for the side that's ahead always, a
 	-- bonus for the side that's behind only while the job needs workers.
@@ -1704,6 +1690,21 @@ local function JobBaseCost(job, currentKey)
 		cost = cost - options.highPriorityDiscount.value
 	end
 	return cost
+end
+
+-- The danger penalty for this worker taking this job. An armed worker (a
+-- commander, a Welder) is army too: it counts its own metal against the
+-- danger there, unless it is already near enough to be counted in it.
+local function WorkerDangerCost(ud, wx, wz, job)
+	local ownMetal = 0
+	if job.danger > 0 and IsArmed(ud) then
+		local cx = (math.floor(job.x / DANGER_CELL) + 0.5) * DANGER_CELL
+		local cz = (math.floor(job.z / DANGER_CELL) + 0.5) * DANGER_CELL
+		if DistanceSq(wx, wz, cx, cz) > options.dangerRadius.value^2 then
+			ownMetal = ud.metalCost or 0
+		end
+	end
+	return DangerCost(job.danger, ownMetal)
 end
 
 -- JobBaseCost() for a worker not on the job, worked out once per job per
@@ -1965,7 +1966,7 @@ local function UpdateWorkers(share)
 		debugCosts = {}
 		for j = 1, #jobs do
 			local job = jobs[j]
-			debugCosts[j] = {job.x, job.y or spGetGroundHeight(job.x, job.z), job.z, SharedBaseCost(job) + LargeStartCost(job)}
+			debugCosts[j] = {job.x, job.y or spGetGroundHeight(job.x, job.z), job.z, SharedBaseCost(job) + LargeStartCost(job) + DangerCost(job.danger)}
 		end
 	end
 	for unitID in pairs(workers) do
@@ -1997,7 +1998,7 @@ local function UpdateWorkers(share)
 							base = SharedBaseCost(job)
 						end
 						local cost = TravelCost(wx, wz, speed, ud.buildDistance, job, travelFactor) + base
-							+ LargeStartCost(job)
+							+ LargeStartCost(job) + WorkerDangerCost(ud, wx, wz, job)
 						if job.key == currentKey then
 							currentCost = cost
 						end
@@ -2050,7 +2051,6 @@ end
 -- Placed on a ring around the factory, within caretaker build range, and not
 -- on its exit side.
 
-local caretakerDefID = UnitDefNames.staticcon and UnitDefNames.staticcon.id
 local CARETAKER_CHECK_SECONDS = 5
 local caretakerTimer = 0
 
@@ -2099,7 +2099,7 @@ local function CaretakerSpot(factoryID, share)
 	if not (fx and ud) then
 		return nil
 	end
-	local exit = FACING_DIR[spGetUnitBuildFacing(factoryID) or 0] or FACING_DIR[0]
+	local exit = FACING_DIR[Spring.GetUnitBuildFacing(factoryID) or 0] or FACING_DIR[0]
 	local halfSize = math.max(ud.xsize or 0, ud.zsize or 0) * 4
 	local maxRadius = UnitDefs[caretakerDefID].buildDistance * 0.6
 	for radius = halfSize + 48, math.max(halfSize + 48, maxRadius), 32 do
@@ -2108,7 +2108,7 @@ local function CaretakerSpot(factoryID, share)
 			local dx, dz = math.sin(angle), math.cos(angle)
 			-- Keep clear of the exit side (within 60 degrees of it).
 			if dx * exit[1] + dz * exit[2] < 0.5 then
-				local x, y, z = spPos2BuildPos(caretakerDefID, fx + dx * radius, fy, fz + dz * radius)
+				local x, y, z = Spring.Pos2BuildPos(caretakerDefID, fx + dx * radius, fy, fz + dz * radius)
 				if x and spTestBuildOrder(caretakerDefID, x, y, z, 0) == 2
 						and OwnCaretakerJobsNear(share, x, z, 64) == 0 then
 					return x, y, z
@@ -2186,6 +2186,14 @@ local function QueueCaretakers(share)
 		end
 	end
 
+	-- Metal piling up means the build power we have isn't spending it all,
+	-- whatever it adds up to on paper (workers walking between jobs, a
+	-- factory between units): then want enough more to spend what goes
+	-- unspent.
+	if metalHigh > 0 then
+		target = math.max(target, power - unfinishedPower + math.max(0, metalIncome - metalPull))
+	end
+
 	-- How short we are of finished caretakers: queued and half-built ones
 	-- still need workers to build them.
 	local short = (target - (power - unfinishedPower)) / caretakerPower
@@ -2193,8 +2201,10 @@ local function QueueCaretakers(share)
 	caretakerStats = {target = target, have = power - unfinishedPower, workerPower = workerPower}
 
 	power = power + OwnCaretakerJobsNear(share, 0, 0, math.huge) * caretakerPower
-	-- Rounded to the nearest: half a caretaker short is enough to add one.
-	local toAdd = math.floor((target - power) / caretakerPower + 0.5)
+	-- Rounded to the nearest: half a caretaker short is enough to add one -
+	-- or while metal is piling up, any shortfall at all.
+	local toAdd = (target - power) / caretakerPower
+	toAdd = (metalHigh > 0) and math.ceil(toAdd - 0.01) or math.floor(toAdd + 0.5)
 	if toAdd <= 0 then
 		return
 	end
@@ -2338,7 +2348,7 @@ local function LogWorkers()
 			local travelSeconds = speed > 0 and distance / speed or 0
 			local travelFactor = IsCommander(ud) and options.commanderTravelFactor.value or 1
 			local travel = TravelCost(wx, wz, speed, ud.buildDistance, job, travelFactor)
-			local base = JobBaseCost(job, key) + LargeStartCost(job)
+			local base = JobBaseCost(job, key) + LargeStartCost(job) + WorkerDangerCost(ud, wx, wz, job)
 			spEcho(string.format("%s %s: %s | %.0f elmos, %.1fs away | cost %.1f = travel %.1f + rest %.1f",
 				stamp, name, DescribeJob(job), distance, travelSeconds, travel + base, travel, base))
 		end
@@ -2464,7 +2474,7 @@ local function AddWorkerCommands(customCommands)
 		local unitDefID = spGetUnitDefID(unitID)
 		if unitDefID then
 			if UnitDefs[unitDefID].customParams.field_factory then
-				local cmdDescs = spGetUnitCmdDescs(unitID)
+				local cmdDescs = Spring.GetUnitCmdDescs(unitID)
 				if cmdDescs then
 					for j = 1, #cmdDescs do
 						local cmdDesc = cmdDescs[j]
@@ -2664,7 +2674,7 @@ function widget:CommandNotify(cmdID, params, opts)
 			local target = params[1]
 			local x, y, z
 			if target >= Game.maxUnits then
-				x, y, z = spGetFeaturePosition(target - Game.maxUnits)
+				x, y, z = Spring.GetFeaturePosition(target - Game.maxUnits)
 			else
 				x, y, z = spGetUnitPosition(target)
 			end
