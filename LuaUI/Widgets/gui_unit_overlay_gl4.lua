@@ -15,7 +15,7 @@ options_path = 'Settings/Interface/Unit Overlay'
 local layout_path = options_path .. '/Size & Layout'
 options_order = {
 	-- General
-	'showGlyphsNumbers', 'drawFeatureHealth', 'fadeDistance', 'statusFadeDistance', 'iconHideDistance', 'trackDarken', 'reloadThreshold',
+	'showGlyphsNumbers', 'drawFeatureHealth', 'fadeDistance', 'statusFadeDistance', 'iconHideDistance', 'trackDarken', 'reloadThreshold', 'timerHalfFill',
 	'debugDrawAtlas',
 	-- Size & Layout (nested)
 	'overallScale',
@@ -75,6 +75,12 @@ options = {
 		noHotkey = true,
 		desc = 'Weapons that reload faster than this (seconds) do not show a reload timer. Commanders always show one.',
 		OnChange = function() init() end,
+	},
+	timerHalfFill = {
+		name = 'Timer half-ring time',
+		type = 'number', value = 5.0, min = 1.0, max = 60.0, step = 0.5,
+		noHotkey = true,
+		desc = 'Seconds remaining at which a round timer badge (reload, jump, build, status) is half full. Lower gives short waits more of the ring; higher keeps long waits easier to tell apart.',
 	},
 	debugDrawAtlas = {
 		name = 'DEBUG: show icon atlas',
@@ -398,6 +404,7 @@ local bitIconCorner = 262144 -- icon billboard pinned to a corner of the unit ic
 local bitModular = 524288 -- ability-slot duration bar: value is target-frame mod 4096, GPU-decremented
 local bitJumpCharge = 1048576 -- below-zone gauge whose value is a reconstructed jumpReload; each badge shows one charge
 local bitRateETA = 2097152 -- below-zone radial ETA badge: build-style band decode (0 hidden / 2+secs building / frozen-static when starved) but NOT top-band
+local bitStructure = 4194304 -- element belongs to an immobile unit: depth-sorted behind every mobile unit's overlay (units stay visible over factories). Highest bit, OR'd on at push time.
 
 -- Columns in the vertical (weapon bar) glyph atlas. Distinct from the horizontal
 -- glyph atlas's uvoffset numbering -- these bar types are always BITVERTICAL, so
@@ -863,6 +870,7 @@ local featureResurrectDistMult = 1 -- how many times closer features have to be 
 local glphydistmult = 3.5 -- how much closer than BARFADEEND the bar has to be to start drawing numbers/icons. Numbers closer to 1 will make the glyphs be drawn earlier, high numbers will only shows glyphs when zoomed in hard.
 local glyphdistmultfeatures = 1.8 -- how much closer than BARFADEEND the bar has to be to start drawing numbers/icons
 
+local unitDefIsStructure = {} -- unitDefID -> true for immobile units (buildings), whose overlay sorts behind mobile units
 local unitDefSizeMultipliers = {} -- table of unitdefID to a size mult (default 1.0) to override sizing of bars per unitdef
 local skipGlyphsNumbers = 0.0  -- 0.0 is draw glyph and number,  1.0 means only numbers, 2.0 means only bars,
 
@@ -937,6 +945,7 @@ local shaderSourceCache = {
 			barBorderWidth = 0.25,
 			trackDarken = 0.25,
 			reloadThreshold = 2.0,
+			timerHalfFill = 5.0,
 			pulseAlpha   = 1.0,
 			rowOffset    = 0.0,
 			rowSize      = 1.0,
@@ -954,6 +963,7 @@ local shaderSourceCache = {
 for udefID, unitDef in pairs(UnitDefs) do
 	-- BAR PLACEMENT
 	unitDefHeights[udefID] = unitDef.height
+	unitDefIsStructure[udefID] = unitDef.isImmobile or nil
 	unitDefSizeMultipliers[udefID] = math.min(1.45, math.max(0.85, (Spring.GetUnitDefDimensions(udefID).radius / 150) + math.min(0.6, unitDef.power / 4000))) + math.min(0.6, unitDef.health / 22000)
 end
 
@@ -1105,14 +1115,14 @@ local function wgReorder(name, order)
 	table.sort(wgIconOrderList, function(a, b) return wgIconOrder[a] < wgIconOrder[b] end)
 end
 
-local function wgNewIconCache(cell, slot, rowHeight, color, pulse, sizeMod)
+local function wgNewIconCache(cell, slot, rowHeight, color, pulse, sizeMod, isStructure)
 	local c = {}
 	for i = 1, 20 do c[i] = 0 end
 	c[1] = rowHeight   -- per-instance height (vert raises centerpos.y by this)
 	c[2] = sizeMod     -- sizeModifier: matches the bars' effectiveScale so the row tracks the bar stack
 	c[3] = slot        -- raw 0-based state index (rides v_range; the shader centers it across the row)
 	c[4] = cell        -- atlas cell (UVOFFSET)
-	c[5] = bitIcon + bitIconRow + (pulse and bitPulse or 0) -- bartype
+	c[5] = bitIcon + bitIconRow + (pulse and bitPulse or 0) + (isStructure and bitStructure or 0) -- bartype
 	local r, g, b, a = 1, 1, 1, 1
 	if color then r, g, b, a = color[1], color[2], color[3], color[4] or 1 end
 	c[9], c[10], c[11], c[12] = r, g, b, a
@@ -1127,14 +1137,14 @@ end
 -- rankCell/groupCell are atlas cells (nil = absent); the shader reads rank from v_range and group from
 -- bartype_index.w. teamColor tints the icon (mincolor); rankColor tints the rank badge (maxcolor); the
 -- group number is tinted green by the FS.
-local function wgNewClusterIconCache(iconCell, rankCell, groupCell, cmdCell, rowHeight, teamColor, rankColor, sizeMod)
+local function wgNewClusterIconCache(iconCell, rankCell, groupCell, cmdCell, rowHeight, teamColor, rankColor, sizeMod, isStructure)
 	local c = {}
 	for i = 1, 20 do c[i] = 0 end
 	c[1] = rowHeight
 	c[2] = sizeMod
 	c[3] = rankCell or -1          -- v_range -> rank atlas cell (-1 = no rank)
 	c[4] = iconCell or 0           -- uvOffset -> icon atlas cell
-	c[5] = bitIcon                 -- center unit icon (FS composites rank+group+command)
+	c[5] = bitIcon + (isStructure and bitStructure or 0) -- center unit icon (FS composites rank+group+command)
 	c[7] = cmdCell or 65535        -- bartype_index.z -> current-command atlas cell (>=60000 = none)
 	c[8] = groupCell or 65535      -- bartype_index.w -> group atlas cell (>=60000 = no group)
 	local r, g, b, a = 1, 1, 1, 1
@@ -1205,7 +1215,7 @@ local function relayoutUnitIcons(unitID)
 	local tr, tg, tb, ta = Spring.GetTeamColor(teamID)
 	pushElementInstance(healthBarVBO,
 		wgNewClusterIconCache(unitDefIconIndex[unitDefID] or 0, rankCell, groupCell, commandCell, rowHeight,
-			{tr or 1, tg or 1, tb or 1, ta or 1}, rankData and rankData.color, effectiveScale),
+			{tr or 1, tg or 1, tb or 1, ta or 1}, rankData and rankData.color, effectiveScale, unitDefIsStructure[unitDefID]),
 		unitID .. "_wgicon_icon", true, nil, unitID)
 	pushedNames['icon'] = true
 
@@ -1229,7 +1239,7 @@ local function relayoutUnitIcons(unitID)
 		local cell = registerDynamicIcon(data.path) or data.cell
 		data.cell = cell
 		pushElementInstance(healthBarVBO,
-			wgNewIconCache(cell, i - 1, rowHeight, data.color, wgIconPulse[name], effectiveScale),
+			wgNewIconCache(cell, i - 1, rowHeight, data.color, wgIconPulse[name], effectiveScale, unitDefIsStructure[unitDefID]),
 			unitID .. "_wgicon_" .. name, true, nil, unitID)
 		pushedNames[name] = true
 	end
@@ -1787,6 +1797,9 @@ local function addBarForUnit(unitID, unitDefID, barname, reason, range, uniformO
 	if uvOffsetOverride ~= nil then healthBarTableCache[4] = uvOffsetOverride end
 	if layoutSlotOverride ~= nil then healthBarTableCache[8] = layoutSlotOverride end
 	if alwaysShow ~= nil then healthBarTableCache[5] = bt.bartype + (alwaysShow and bitAlwaysShow or 0) end
+	-- bt.cache is shared across units, so strip a structure flag left by the previous unit, then set it
+	-- for this one (bitStructure is the highest bit, so the modulo removes exactly that flag).
+	healthBarTableCache[5] = healthBarTableCache[5] % bitStructure + (unitDefIsStructure[unitDefID] and bitStructure or 0)
 
 	return pushElementInstance(
 		healthBarVBO, -- push into this Instance VBO Table
@@ -1876,7 +1889,7 @@ local function addBarsForUnit(unitID, unitDefID, unitTeam, unitAllyTeam, reason)
 					if show then addBarForUnit(unitID, unitDefID, cfg, reason, range, slotCh) end
 				end
 			elseif kind == "burst" then
-				-- range = reload frames so the badge's magnitude tier reflects the real reload (the value is
+				-- range = reload frames so the badge's time-scaled fill reflects the real reload (the value is
 				-- a modular completion frame, like the multi-weapon reload badges), not a 0-100 percent scale.
 				addBarForUnit(unitID, unitDefID, "bustreload" .. ab.index, reason, unitDefScriptReload[unitDefID] or 100, slotCh)
 			elseif kind == "dgun" or kind == "moveDgun" then
@@ -2516,6 +2529,7 @@ function widget:DrawWorld()
 	healthBarShader:SetUniform("barBorderWidth", options.barBorder.value)
 	healthBarShader:SetUniform("trackDarken", options.trackDarken.value)
 	healthBarShader:SetUniform("reloadThreshold", options.reloadThreshold.value)
+	healthBarShader:SetUniform("timerHalfFill", options.timerHalfFill.value)
 	healthBarShader:SetUniform("digitAtlasStart", digitAtlasStartIndex)
 	healthBarShader:SetUniform("jumpIconCell", jumpIconAtlasIndex)
 	healthBarShader:SetUniform("effectTime", os.clock()) -- drives the animated paralyze/disarm icon lightning
