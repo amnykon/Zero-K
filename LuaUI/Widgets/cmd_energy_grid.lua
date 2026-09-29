@@ -134,7 +134,7 @@ local SpotBlocked = NEVER_BLOCKED
 -- the selected constructors - or, pre-game, instead of the initial queue.
 local function GBCActive()
 	local gbc = WG.GlobalBuildCommandV2
-	return gbc and gbc.IsActive() and WG.GlobalBuildQueueShare and true or false
+	return gbc and gbc.IsActive() and WG.GlobalBuildListShare and true or false
 end
 
 -- The reach test for the builders the grid is for: the GBC workers in GBC mode
@@ -1449,7 +1449,7 @@ end
 -- Every allied GBC build job with a pylon range, into queuedBuildings: in GBC
 -- mode they're already taken care of, so they're skip-anchors.
 local function gatherGBCJobs()
-	local share = WG.GlobalBuildQueueShare
+	local share = WG.GlobalBuildListShare
 	local teams = Spring.GetTeamList(spGetMyAllyTeamID())
 	for t = 1, #teams do
 		local teamID = teams[t]

@@ -1,15 +1,15 @@
 --------------------------------------------------------------------------------
 --------------------------------------------------------------------------------
 --
---  file:    gui_global_build_queue_ally.lua
---  brief:   Shows the local player's own Global Build Command queue, allied
---           players' queues, and (for spectators) everyone's queue.
+--  file:    gui_global_build_list.lua
+--  brief:   Shows the local player's own Global Build Command list, allied
+--           players' lists, and (for spectators) everyone's list.
 --
 --  This widget is the job store for Global Build Command v2
 --  (unit_global_build_command.lua): GBC v2 writes jobs through
---  WG.GlobalBuildQueueShare.Update()/Delete(), and this widget holds them,
+--  WG.GlobalBuildListShare.Update()/Delete(), and this widget holds them,
 --  shares them with allies and spectators, and draws them. GBC v2 doesn't
---  draw its own queue - this widget draws it for the local player too, not
+--  draw its own list - this widget draws it for the local player too, not
 --  just for allies/spectators. It never touches anyone's units itself.
 --
 --  Job identity is assigned by this widget, not the caller: Update() derives
@@ -23,8 +23,8 @@
 
 function widget:GetInfo()
 	return {
-		name      = "Global Build Queue",
-		desc      = "Shows your own Global Build Command queue, allied players' queues, and (for spectators) every player's queue. Job store for Global Build Command v2.",
+		name      = "Global Build List",
+		desc      = "Shows your own Global Build Command list, allied players' lists, and (for spectators) every player's list. Job store for Global Build Command v2.",
 		author    = "amnykon",
 		date      = "September 25, 2026",
 		license   = "GNU GPL, v2 or later",
@@ -39,14 +39,15 @@ end
 
 options_path = 'Settings/Unit Behaviour/Worker AI'
 options_order = {
-	'allyQueueAlwaysShow',
+	'alwaysShow',
 }
 options = {
-	allyQueueAlwaysShow = {
-		name = 'Always Show Ally Build Queue',
+	alwaysShow = {
+		name = 'Always Show Global Build Lists',
 		type = 'bool',
-		desc = 'Show allied (and, while spectating, all) players\' Global Build Command queues at all times.\nOtherwise they are only shown while \255\200\200\200shift\255\255\255\255 is held.\n (default = false)',
+		desc = 'Show allied (and, while spectating, all) players\' Global Build Command lists at all times.\nOtherwise they are only shown while \255\200\200\200shift\255\255\255\255 is held.\n (default = false)',
 		value = false,
+		advanced = true,
 	},
 }
 
@@ -114,7 +115,7 @@ local res_color = {0.4, 0.8, 1.0, 1.0}
 --   - marks all of their own currently-owned jobIds as pending (see
 --     MarkAllOwnJobsPending), so they go out through the ordinary delta path
 --     below rather than needing a separate "full snapshot" message shape.
---   - sends back the copy they hold of the requester's own queue (see
+--   - sends back the copy they hold of the requester's own list (see
 --     SendRestore), so the requester gets its own jobs back - they only
 --     lived in the widget's memory, and a reload or rejoin loses them.
 -- <nonce> is a random number picked per request. Restores quote it back, and
@@ -124,9 +125,9 @@ local res_color = {0.4, 0.8, 1.0, 1.0}
 -- "GBCQ|O,<ownerTeamID>,<nonce>;<U records>" - a restore: the U records
 -- that follow are the requester's team's jobs, sent back by an ally holding a
 -- copy. Only players on that team apply them, and only from allies (never
--- spectators, who could otherwise write into a player's own queue). It
+-- spectators, who could otherwise write into a player's own list). It
 -- accepts restores from the first ally to answer and ignores the rest, since
--- every ally should hold the same copy. A big queue is split over several
+-- every ally should hold the same copy. A big list is split over several
 -- messages, each starting with the same header.
 --
 -- "GBCQ|<data>" - a delta. <data> is zero or more ';'-terminated records,
@@ -204,7 +205,7 @@ local res_color = {0.4, 0.8, 1.0, 1.0}
 -- way demo playback does. The sync request above exists for the other case a
 -- one-off full send would otherwise be needed for: a widget enabled mid-game,
 -- which never received any of the deltas sent before it existed. The replay
--- doesn't restore a rejoining player's own queue, since RecvLuaMsg ignores
+-- doesn't restore a rejoining player's own list, since RecvLuaMsg ignores
 -- our own messages - the restore above covers that, if we have allies.
 --
 -- Who is listened to: only players, never spectators, since a spectator's
@@ -238,7 +239,7 @@ local RESTORE_WINDOW = 30
 -- Whether we're catching up to the server (a rejoin), from GameProgress, as
 -- gui_recv_indicator.lua does. While catching up, messages are replays of
 -- old ones, so sync requests among them aren't answered: our copy of the
--- requester's queue would be from the replay's past, not the present.
+-- requester's list would be from the replay's past, not the present.
 local catchingUp = false
 local CATCHING_UP_FRAMES = 120
 
@@ -249,7 +250,7 @@ local CATCHING_UP_FRAMES = 120
 -- dictionaries of plain numbers avoids that, at the cost of more repetitive
 -- code around them.
 
--- Every team's queue - ours included - lives in this one set of
+-- Every team's list - ours included - lives in this one set of
 -- dictionaries, keyed by "<teamID>#<jobId>" rather than by jobId alone,
 -- since jobId is a hash of a job's own content (see BuildJobHash) and two
 -- different teams can independently produce the exact same one (eg. both
@@ -657,11 +658,11 @@ function widget:RecvLuaMsg(msg, playerID)
 	ApplyRecordsData(playerID, rest)
 end
 
--- Precise, event-driven cleanup instead of a timeout: a player's queue stops
+-- Precise, event-driven cleanup instead of a timeout: a player's list stops
 -- mattering exactly when they leave (PlayerRemoved - disconnect/quit/kick) or
 -- resign (PlayerChanged, when Spring.GetPlayerInfo now reports them as a
 -- spectator), not after some guessed number of quiet seconds. This also means
--- a player who simply hasn't changed their queue in a while is never
+-- a player who simply hasn't changed their list in a while is never
 -- mistaken for one who's gone.
 -- Whether any player (other than exceptPlayerID) is still on a team.
 local function TeamHasPlayers(teamID, exceptPlayerID)
@@ -808,7 +809,7 @@ local function ShouldShow()
 	if spIsGUIHidden() then
 		return false
 	end
-	if options.allyQueueAlwaysShow.value then
+	if options.alwaysShow.value then
 		return true
 	end
 	local _, _, _, shift = spGetModKeyState()
@@ -816,7 +817,7 @@ local function ShouldShow()
 end
 
 -- The three helpers below hold the actual GL drawing logic for one job. Since
--- our own queue and everyone else's live in the same set of dictionaries
+-- our own list and everyone else's live in the same set of dictionaries
 -- (see where cmdId/jobX/... are declared), the widget:DrawX() callins below
 -- only need one loop each over the whole table, rather than one loop per
 -- source.
@@ -958,7 +959,7 @@ end
 -- There's no "replace everything" call: a jobId sticks around until
 -- Delete() is called for it specifically, so every removal needs its own
 -- explicit Delete() call - eg. GBC's own `buildQueue[hash] = nil` needs a
--- matching `WG.GlobalBuildQueueShare.Delete(jobId)` alongside it, not just
+-- matching `WG.GlobalBuildListShare.Delete(jobId)` alongside it, not just
 -- the removal of the Lua table entry.
 local function UpdateJob(job)
 	local jobId = BuildJobHash(job)
@@ -984,7 +985,7 @@ local function UpdateJob(job)
 end
 
 -- To be called whenever a job is removed - eg. GBC's own
--- `buildQueue[hash] = nil` becomes `WG.GlobalBuildQueueShare.Delete(jobId)`,
+-- `buildQueue[hash] = nil` becomes `WG.GlobalBuildListShare.Delete(jobId)`,
 -- using whatever jobId the matching Update() call returned.
 local function DeleteJob(jobId)
 	ClearJob(myTeamID .. "#" .. jobId)
@@ -994,7 +995,7 @@ end
 -- To be called whenever the number of workers *we* have assigned to a job
 -- changes, whether it's our own job or one we're just assisting - eg. an AI
 -- deciding to send 2 workers to help build something an ally queued would
--- call WG.GlobalBuildQueueShare.Assist(allyPlayerID, jobId, 2). Unlike
+-- call WG.GlobalBuildListShare.Assist(allyPlayerID, jobId, 2). Unlike
 -- Update()/Delete(), the job's owner has to be named explicitly, since we're
 -- reporting our own contribution to a job we don't necessarily own.
 -- workers = 0 (or nil) means we've stopped assisting it.
@@ -1006,7 +1007,7 @@ end
 
 -- Returns one of a job's core fields (see the network protocol comment above
 -- for what each means), or nil if the job doesn't exist. This is GBC's own
--- read access into any player's queue, including its own - the same way
+-- read access into any player's list, including its own - the same way
 -- GetWorkerCount()/GetReach()/GetPriority()/GetUnitID() below expose the
 -- rest of a job's data.
 local function GetCmdId(ownerTeamID, jobId)
@@ -1084,8 +1085,8 @@ end
 -- Returns an array of every jobId currently on file for ownerTeamID (empty
 -- if they have none), in no particular order. The only way to discover a
 -- job without already knowing its jobId - eg. for an AI weighing whether one
--- of its own workers should help build something on an ally's queue, which
--- needs to see that queue's jobs at all before it can cost any of them.
+-- of its own workers should help build something on an ally's list, which
+-- needs to see that list's jobs at all before it can cost any of them.
 -- Every other Get* function above is a point lookup by (ownerTeamID,
 -- jobId); this is the one enumeration this widget exposes.
 local function GetJobIds(ownerTeamID)
@@ -1102,17 +1103,17 @@ end
 function widget:Initialize()
 	myPlayerID = spGetMyPlayerID()
 	myTeamID = spGetMyTeamID()
-	-- Ask everyone else to (re-)send their current queue, since we won't have
+	-- Ask everyone else to (re-)send their current list, since we won't have
 	-- seen any of the deltas from before we existed (eg. this widget just got
 	-- enabled mid-game).
-	-- The same request also gets our own queue sent back by an ally, if a
+	-- The same request also gets our own list sent back by an ally, if a
 	-- reload or rejoin lost it.
 	syncNonce = tostring(math.random(1, 1000000000))
 	restoreFrom = nil
 	restoreTimer = 0
 	spSendLuaUIMsg(MSG_PREFIX .. "S," .. syncNonce, "a")
 	spSendLuaUIMsg(MSG_PREFIX .. "S," .. syncNonce, "s")
-	WG.GlobalBuildQueueShare = {
+	WG.GlobalBuildListShare = {
 		Update = UpdateJob,
 		Delete = DeleteJob,
 		Assist = AssistJob,
@@ -1135,5 +1136,5 @@ function widget:Initialize()
 end
 
 function widget:Shutdown()
-	WG.GlobalBuildQueueShare = nil
+	WG.GlobalBuildListShare = nil
 end

@@ -4,13 +4,14 @@
 --  file:    unit_global_build_command.lua
 --  brief:   Start of a new Global Build Command. While GBC mode is on, every
 --           build/repair/reclaim/resurrect order you give is queued into
---           WG.GlobalBuildQueueShare (gui_global_build_queue_ally.lua)
+--           WG.GlobalBuildListShare (gui_global_build_list.lua)
 --           instead of being handed to the selected units, so you can keep
 --           an army selected and still queue jobs for your constructors.
 --           Constructors join or leave GBC with the Global Build state
 --           button (on by default), and the worker AI assigns them to your
 --           and your allies' jobs by cost (see the Worker AI section;
---           costs are under Settings/Unit Behaviour/Worker AI/Costs).
+--           costs are under Settings/Unit Behaviour/Worker AI/Costs, shown
+--           only with advanced settings).
 --
 --  Usage:
 --    Tab (default; rebind under Hotkeys/Construction)
@@ -37,7 +38,7 @@
 --  becomes repair jobs on the terraform gadget's "terraunits".
 --
 --  Job identity is derived by Update() itself from the job's own content
---  (see gui_global_build_queue_ally.lua's BuildJobHash) - this widget never
+--  (see gui_global_build_list.lua's BuildJobHash) - this widget never
 --  computes a hash itself, and reads its own jobs back from the store rather
 --  than keeping a list of them. Placing the same building at the same spot
 --  again naturally updates that same job rather than queuing a duplicate,
@@ -49,7 +50,7 @@
 function widget:GetInfo()
 	return {
 		name      = "Global Build Command v2",
-		desc      = "Start of a new Global Build Command: while toggled on (Tab by default), build/repair/reclaim/resurrect orders are queued into WG.GlobalBuildQueueShare instead of given to the selected units.",
+		desc      = "Start of a new Global Build Command: while toggled on (Tab by default), build/repair/reclaim/resurrect orders are queued into WG.GlobalBuildListShare instead of given to the selected units.",
 		author    = "amnykon",
 		date      = "September 26, 2026",
 		license   = "GNU GPL, v2 or later",
@@ -417,7 +418,7 @@ options_order = {
 	'dangerRadius', 'dangerPerMetal', 'dangerMax', 'dangerAllyMultiplier', 'dangerDefenceMultiplier', 'dangerRadarDotMetal',
 	'autoCaretakers', 'autoCaretakersIdleFactories', 'maxCaretakersPerFactory', 'caretakerNeedBonus',
 	'lowPriorityCost', 'highPriorityDiscount',
-	'debugCosts', 'debugEconLog', 'debugWorkerLog',
+	'debugCosts', 'debugDanger', 'debugEconLog', 'debugWorkerLog',
 }
 options = {
 	workerAI = {
@@ -662,6 +663,13 @@ options = {
 		value = false,
 		noHotkey = true,
 	},
+	debugDanger = {
+		name = 'Debug: show danger',
+		desc = 'Print the danger of every danger square on the map at its centre: its danger in metal and the cost that adds to a job there, then the enemy, allied unit and allied defence metal it is worked out from. Updated on each worker AI update.',
+		type = 'bool',
+		value = false,
+		noHotkey = true,
+	},
 	debugWorkerLog = {
 		name = 'Debug: log workers',
 		desc = 'Every 10 seconds, write a line to the infolog for each GBC worker: the job it is on, how far it is from it and how long it takes to get there, and that job\'s cost.',
@@ -687,6 +695,14 @@ options = {
 		path = 'Hotkeys/Construction',
 	},
 }
+
+-- Every setting is advanced (hidden unless the player shows advanced
+-- settings); only the mode's hotkey stays visible, so it can be rebound.
+for key, option in pairs(options) do
+	if key ~= 'toggle' then
+		option.advanced = true
+	end
+end
 
 --------------------------------------------------------------------------------
 -- Membership
@@ -770,7 +786,7 @@ end
 -- got back after a reload or rejoin can be removed too. Shared by right-drag
 -- removal and the Global Build Cancel command.
 local function RemoveJobsInCircle(x, z, r)
-	local share = WG.GlobalBuildQueueShare
+	local share = WG.GlobalBuildListShare
 	if not share then
 		return
 	end
@@ -787,7 +803,7 @@ local function RemoveJobsInCircle(x, z, r)
 end
 
 local function QueueJob(job)
-	WG.GlobalBuildQueueShare.Update(job)
+	WG.GlobalBuildListShare.Update(job)
 end
 
 --------------------------------------------------------------------------------
@@ -798,7 +814,7 @@ end
 -- Worker AI
 --------------------------------------------------------------------------------
 -- Every updateRate seconds, each GBC worker that is idle or on a GBC job picks
--- the job with the lowest cost, from our own and our allies' queues in the job
+-- the job with the lowest cost, from our own and our allies' lists in the job
 -- store. Costs are in seconds:
 --   - travel time: distance to the job, less the worker's build range (and an
 --     area job's radius), divided by the worker's speed.
@@ -867,7 +883,7 @@ local function SetOurCount(key, count)
 	if baseCosts then
 		baseCosts[key] = nil
 	end
-	local share = WG.GlobalBuildQueueShare
+	local share = WG.GlobalBuildListShare
 	local owner, jobId = SplitKey(key)
 	if share and owner then -- not for helping a factory, which isn't a job store job
 		share.Assist(owner, jobId, count)
@@ -914,7 +930,7 @@ end
 -- A new unit (anyone's on our side) that sits on one of our build jobs'
 -- spots, of the right type, is that job's unit.
 local function LinkNewUnit(unitID, unitDefID)
-	local share = WG.GlobalBuildQueueShare
+	local share = WG.GlobalBuildListShare
 	if not share then
 		return
 	end
@@ -1040,6 +1056,9 @@ local dangerCache = {}
 -- {x, y, z, cost} per job from the last worker AI update, for the debugCosts
 -- option, or nil.
 local debugCosts
+-- {x, y, z, danger, cost, enemy, allied, defence} per danger square from the
+-- last worker AI update, for the debugDanger option, or nil.
+local debugDanger
 
 local function DangerSums(x, z)
 	local radius = options.dangerRadius.value
@@ -1087,6 +1106,24 @@ local function DangerAt(x, z, ownDefenceMetal)
 		- (sums[3] + (ownDefenceMetal or 0)) * options.dangerDefenceMultiplier.value)
 end
 
+-- Every danger square on the map, for the debugDanger option. Fills
+-- dangerCache as it goes, so the jobs' own lookups this update are free.
+local function CollectDebugDanger()
+	debugDanger = {}
+	for cx = 0, math.ceil(Game.mapSizeX / DANGER_CELL) - 1 do
+		for cz = 0, math.ceil(Game.mapSizeZ / DANGER_CELL) - 1 do
+			local x, z = (cx + 0.5) * DANGER_CELL, (cz + 0.5) * DANGER_CELL
+			local danger = DangerAt(x, z)
+			local sums = dangerCache[cx .. "," .. cz]
+			debugDanger[#debugDanger + 1] = {
+				x, spGetGroundHeight(x, z), z,
+				danger, math.min(options.dangerMax.value, danger * options.dangerPerMetal.value),
+				sums[1], sums[2], sums[3],
+			}
+		end
+	end
+end
+
 -- How many workers a job wants: enough workers of average build power to
 -- build it in the target finish time. From the whole build time, so it
 -- doesn't change as the job progresses.
@@ -1102,7 +1139,7 @@ end
 -- waitingSince[key] = game frame since which a job has had no workers on it.
 local waitingSince = {}
 
--- Every job in our own and our allies' queues that can still be worked on,
+-- Every job in our own and our allies' lists that can still be worked on,
 -- with what the cost needs precomputed once per update.
 -- Backup reclaim: for each BACKUP_RECLAIM_CELL square with one of our
 -- buildings in it and at least BACKUP_RECLAIM_MIN_METAL of reclaimable metal,
@@ -1910,6 +1947,9 @@ local function UpdateWorkers(share)
 	UpdateResources()
 	UpdateSplit()
 	dangerCache = {}
+	if options.debugDanger.value then
+		CollectDebugDanger()
+	end
 	local frame = spGetGameFrame()
 	local jobs = CollectJobs(share, AverageBuildPower(), frame)
 	local jobByKey = {}
@@ -2317,13 +2357,14 @@ function widget:Update(dt)
 		return
 	end
 	updateTimer = 0
-	local share = WG.GlobalBuildQueueShare
+	local share = WG.GlobalBuildListShare
 	if not share or spGetSpectatingState() then
 		return
 	end
 	-- Our own jobs are ours to keep tidy even when we don't lead the team.
 	CleanOwnJobs(share)
 	debugCosts = nil
+	debugDanger = nil
 	if managedTeamID and options.workerAI.value then
 		UpdateWorkers(share)
 		if caretakerTimer >= CARETAKER_CHECK_SECONDS then
@@ -2350,9 +2391,9 @@ end
 -- selection already has are skipped, so a selected constructor doesn't give
 -- two copies of each.
 --
--- UNTESTED: relies on the engine doing building placement (preview, facing,
--- grid snapping, line/area placement) for a widget-added build command that
--- no selected unit can build.
+-- Relies on the engine doing building placement (preview, facing, grid
+-- snapping, line/area placement) for a widget-added build command that no
+-- selected unit can build.
 local workerCommands = {
 	{
 		flag    = "canRepair",
@@ -2603,7 +2644,7 @@ function widget:CommandNotify(cmdID, params, opts)
 		return true
 	end
 
-	if not active or not WG.GlobalBuildQueueShare then
+	if not active or not WG.GlobalBuildListShare then
 		return false
 	end
 
@@ -2672,9 +2713,9 @@ function externalFunctions.GetHotkey()
 	return hotkey or ""
 end
 
--- How many jobs we own in the shared queue.
+-- How many jobs we own in the shared list.
 function externalFunctions.GetJobCount()
-	local share = WG.GlobalBuildQueueShare
+	local share = WG.GlobalBuildListShare
 	if not share then
 		return 0
 	end
@@ -2686,7 +2727,7 @@ end
 -- queued, false if GBC mode is off (the caller then orders units itself).
 -- elevation (optional): absolute height to level the footprint to first.
 function externalFunctions.QueueBuild(cmdID, x, y, z, facing, elevation)
-	if not (active and WG.GlobalBuildQueueShare) then
+	if not (active and WG.GlobalBuildListShare) then
 		return false
 	end
 	QueueJob({id = cmdID, x = x, y = y or spGetGroundHeight(x, z), z = z, h = facing or 0, elevation = elevation})
@@ -2695,7 +2736,7 @@ end
 
 -- Help finish (repair) a unit, eg. an allied nanoframe.
 function externalFunctions.QueueRepair(targetID)
-	if not (active and WG.GlobalBuildQueueShare) then
+	if not (active and WG.GlobalBuildListShare) then
 		return false
 	end
 	local x, y, z = spGetUnitPosition(targetID)
@@ -2725,7 +2766,7 @@ local compatibility = {
 	-- terra (optional, from area mex's terraform modes): {elevation = ...} to
 	-- bury the mex, or {wall = ...} to wall it.
 	CommandNotifyMex = function(cmdID, params, cmdOpts, isAreaMex, terra)
-		if not (active and WG.GlobalBuildQueueShare) then
+		if not (active and WG.GlobalBuildListShare) then
 			return false
 		end
 		QueueJob({
@@ -2737,7 +2778,7 @@ local compatibility = {
 	-- A building at a height (persistent build height), offered before any
 	-- terraform is ordered: queued as one job with that elevation.
 	CommandNotifyBuildAtHeight = function(cmdID, x, y, z, facing)
-		if not (active and WG.GlobalBuildQueueShare) then
+		if not (active and WG.GlobalBuildListShare) then
 			return false
 		end
 		QueueJob({id = cmdID, x = x, y = y, z = z, h = facing or 0, elevation = y})
@@ -2748,7 +2789,7 @@ local compatibility = {
 	-- no constructors are sent to it; the terraunits it creates are captured as
 	-- repair jobs instead.
 	CommandNotifyTF = function(unitArray, shift)
-		if not (active and WG.GlobalBuildQueueShare and terraunitDefID) then
+		if not (active and WG.GlobalBuildListShare and terraunitDefID) then
 			return false
 		end
 		captureTerraformUntil = spGetGameFrame() + TERRAFORM_CAPTURE_FRAMES
@@ -2759,7 +2800,7 @@ local compatibility = {
 	-- around it is done. (Persistent build height uses
 	-- CommandNotifyBuildAtHeight instead.)
 	CommandNotifyRaiseAndBuild = function(unitArray, cmdID, x, y, z, facing, shift)
-		if not (active and WG.GlobalBuildQueueShare and terraunitDefID) then
+		if not (active and WG.GlobalBuildListShare and terraunitDefID) then
 			return false
 		end
 		captureTerraformUntil = spGetGameFrame() + TERRAFORM_CAPTURE_FRAMES
@@ -2802,7 +2843,7 @@ function widget:UnitCreated(unitID, unitDefID, unitTeam)
 		local ux, uy, uz = spGetUnitPosition(unitID)
 		if ux then
 			alliedTerraunits[unitID] = {ux, uz}
-			if unitTeam == spGetMyTeamID() and spGetGameFrame() <= captureTerraformUntil and WG.GlobalBuildQueueShare then
+			if unitTeam == spGetMyTeamID() and spGetGameFrame() <= captureTerraformUntil and WG.GlobalBuildListShare then
 				QueueJob({id = CMD_REPAIR, target = unitID, x = ux, y = uy, z = uz})
 			end
 		end
@@ -2813,7 +2854,7 @@ function widget:UnitCreated(unitID, unitDefID, unitTeam)
 end
 
 function widget:UnitFinished(unitID, unitDefID, unitTeam)
-	local share = WG.GlobalBuildQueueShare
+	local share = WG.GlobalBuildListShare
 	if not share then
 		return
 	end
@@ -2854,7 +2895,7 @@ function widget:UnitDestroyed(unitID, unitDefID, unitTeam)
 	-- A build job's unfinished unit was destroyed: the job goes back to
 	-- needing building from scratch. (A finished one's job was removed in
 	-- UnitFinished.)
-	local share = WG.GlobalBuildQueueShare
+	local share = WG.GlobalBuildListShare
 	if share then
 		local owner, jobId = share.GetJobByUnitID(unitID)
 		if owner and owner == spGetMyTeamID() then
@@ -2947,6 +2988,27 @@ function widget:DrawWorld()
 			gl.Text(string.format("%.1f", entry[4]), 0, 0, DEBUG_COST_SIZE, "co")
 			gl.PopMatrix()
 		end
+	end
+	if debugDanger and options.debugDanger.value and not Spring.IsGUIHidden() then
+		for i = 1, #debugDanger do
+			local entry = debugDanger[i]
+			gl.PushMatrix()
+			gl.Translate(entry[1], entry[2] + DEBUG_COST_HEIGHT, entry[3])
+			gl.Billboard()
+			if entry[4] > 0 then
+				gl.Color(1, 0.3, 0.3, 1)
+			elseif entry[6] > 0 then
+				gl.Color(1, 0.8, 0.2, 1) -- enemies, but outweighed
+			else
+				gl.Color(0.6, 0.6, 0.6, 0.6)
+			end
+			gl.Text(string.format("%.0f (%.1fs)", entry[4], entry[5]), 0, 0, DEBUG_COST_SIZE, "co")
+			if entry[6] > 0 or entry[7] > 0 or entry[8] > 0 then
+				gl.Text(string.format("e%.0f a%.0f d%.0f", entry[6], entry[7], entry[8]), 0, -DEBUG_COST_SIZE, DEBUG_COST_SIZE * 0.75, "co")
+			end
+			gl.PopMatrix()
+		end
+		gl.Color(1, 1, 1, 1)
 	end
 end
 
