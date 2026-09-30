@@ -1,0 +1,2546 @@
+-------------------------------------------------------------------------------
+
+function widget:GetInfo()
+  return {
+    name      = "Chili Core Selector",
+    desc      = "v0.6 Manage your boi, idle cons, and factories.",
+    author    = "KingRaptor, GoogleFrog",
+    date      = "2011-6-2",
+    license   = "GNU GPL, v2 or later",
+    layer     = 1001,
+    enabled   = true,
+  }
+end
+
+-------------------------------------------------------------------------------
+-------------------------------------------------------------------------------
+
+include("Widgets/COFCTools/ExportUtilities.lua")
+VFS.Include("LuaRules/Configs/customcmds.h.lua")
+
+Spring.Utilities = Spring.Utilities or {}
+VFS.Include("LuaRules/Utilities/unitDefReplacements.lua")
+local GetUnitCanBuild = Spring.Utilities.GetUnitCanBuild
+
+-------------------------------------------------------------------------------
+-------------------------------------------------------------------------------
+local spGetUnitDefID      = Spring.GetUnitDefID
+local spGetUnitHealth     = Spring.GetUnitHealth
+local spGetFullBuildQueue = Spring.GetFullBuildQueue
+local spGetMouseState     = Spring.GetMouseState
+local spTraceScreenRay    = Spring.TraceScreenRay
+local spGetUnitRulesParam = Spring.GetUnitRulesParam
+local spGetUnitPosition   = Spring.GetUnitPosition
+
+-------------------------------------------------------------------------------
+-------------------------------------------------------------------------------
+
+local DEFAULT_IDLE_OPACITY = 0.45
+local BUTTON_COLOR = {0.15, 0.39, 0.45, 0.85}
+local BUTTON_COLOR_FACTORY = {0.15, 0.39, 0.45, 0.85}
+local BUTTON_COLOR_WARNING = {1, 0.2, 0.1, 1}
+local BUTTON_COLOR_DISABLED = {0.2,0.2,0.2,1}
+local buttonColorHighlight = {0.8, 0.8, 0.2, DEFAULT_IDLE_OPACITY}
+local IMAGE_COLOR_DISABLED = {0.3, 0.3, 0.3, 1}
+
+local HOTKEY_FONT_SIZE = 12
+local BOTTOM_RIGHT_FONT_SIZE = 14
+
+local stateCommands = { -- FIXME: is there a better way of doing this?
+  [CMD_WANT_CLOAK] = true, -- this is the only one that's really needed, since it can occur without user input (when a temporarily decloaked unit recloaks)
+  [CMD.FIRE_STATE] = true,
+  [CMD.MOVE_STATE] = true,
+  [CMD_WANT_ONOFF] = true,
+  [CMD.REPEAT] = true,
+  [CMD.IDLEMODE] = true,
+}
+--------------------------------------------------------------------------------
+--------------------------------------------------------------------------------
+
+local Chili
+local Button
+local Control
+local Label
+local Window
+local Panel
+local Image
+local Progressbar
+local screen0
+-------------------------------------------------------------------------------
+-------------------------------------------------------------------------------
+
+local mainWindow, buttonHolder, mainBackground
+
+local echo = Spring.Echo
+
+-- list and interface vars
+local buttonList
+
+-- Fixes change team flicker. Buttons are not visible in the frame after they
+-- are created. Images are visible immediately. The solution is to hide the
+-- images of the old button list when creating a new one. The old button list
+-- is destroyed fully one frame later.
+local oldButtonList
+
+-- Missile silos are factories, so they show up as factory buttons; the
+-- hideMissileSilos option filters them out (the Launch button covers them).
+local MISSILE_SILO_DEFID = UnitDefNames.staticmissilesilo and UnitDefNames.staticmissilesilo.id
+
+-- Forward declaration: the missile option OnChange handlers (defined in the options
+-- table below) rebuild the button list via ClearData, which is defined much later.
+local ClearData
+
+local factoryList = {}
+local commanderList = {}
+local idleCons = {}	-- [unitID] = true
+local idleTransports = {} -- [unitID] = true
+local consCarriedByEnemyTransports = {} -- [unitID] = true
+local fromConIDToCarryingTransportID = {}
+local fromTransportIDToCarriedConID = {}
+
+local wantUpdateCons = false
+local readyUntaskedBombers = {}	-- [unitID] = true
+local idleConCount = 0
+local factoryIndex = 1
+local commanderIndex = 1
+
+local myTeamID = Spring.GetMyTeamID()
+
+local buttonSizeShort = 4
+local buttonCountLimit = 7
+
+-- Extra long-axis size (beyond one normal button) that the launch button needs
+-- for its grid rows. The launch button is the last button, so its growth only
+-- has to enlarge the background panel; while it exists it resizes itself and the
+-- panel inline (see UpdateButton). wantLaunchRelayout defers the shrink for when
+-- the button is removed (no missiles left) and can no longer relayout itself.
+local launchButtonExtraLong = 0
+local wantLaunchRelayout = false
+
+-------------------------------------------------------------------------------
+-------------------------------------------------------------------------------
+
+local IMAGE_REPEAT = LUAUI_DIRNAME .. 'Images/repeat.png'
+local FACTORY_FRAME = "bitmaps/icons/frame_cons.png"
+local BUILD_ICON_ACTIVE = LUAUI_DIRNAME .. 'Images/idlecon.png' --LUAUI_DIRNAME .. 'Images/commands/Bold/build.png'
+local BUILD_ICON_DISABLED = LUAUI_DIRNAME .. 'Images/idlecon_bw.png'
+
+local UPDATE_FREQUENCY = 0.25
+local COMM_WARNING_TIME	= 2
+local IDLE_CONS_HIGHLIGHT_TIME = 0.5
+
+local CONSTRUCTOR_ORDER = 1
+local COMMANDER_ORDER = 2
+local FACTORY_ORDER = 3
+local LAUNCH_ORDER = 4
+local GBC_ORDER = 1.5 -- right after the idle constructor button
+
+local GBC_BUTTON_ID = "gbc"
+local GBC_ICON = LUAUI_DIRNAME .. 'Images/commands/Bold/build.png'
+
+local CONSTRUCTOR_BUTTON_ID = "cons"
+local LAUNCH_BUTTON_ID = "launch"
+
+local exceptionList = {
+	staticrearm = true,
+	reef = true,
+}
+
+local exceptionArray = {}
+for name in pairs(exceptionList) do
+	if UnitDefNames[name] then
+		exceptionArray[UnitDefNames[name].id] = true
+	end
+end
+
+local function SetButtonColorHighlight(opacity)
+	buttonColorHighlight[4] = opacity
+end
+
+local function CanBeAnIdleCons(ud)
+	return (ud.buildSpeed > 0) and (not exceptionArray[ud.id]) and (not ud.isFactory)
+		and (options.monitoridlecomms.value or not ud.customParams.dynamic_comm)
+		and (options.monitoridlenano.value or ud.canMove)
+end
+local function CheckHide(forceUpdate)
+	local spec = Spring.GetSpectatingState()
+	local showButtons, showBackground
+	if options.showCoreSelector.value == 'always' then
+		showBackground = true
+		showButtons = true
+	elseif options.showCoreSelector.value == 'specSpace' then
+		showBackground = true
+		showButtons = not spec
+	elseif options.showCoreSelector.value == 'specHide' then
+		showBackground = not spec
+		showButtons = not spec
+	else
+		showBackground = false
+		showButtons = false
+	end
+	
+	buttonHolder:SetVisibility(showButtons)
+	if showBackground == showButtons then
+		mainBackground.SetVisible(showBackground)
+	end
+	mainBackground.UpdateSpecShowMode(showBackground ~= showButtons, forceUpdate)
+end
+
+function widget:PlayerChanged()
+	CheckHide()
+end
+
+local function ButtonHolderResize(self)
+	local longSize, shortSize = self.clientArea[3], self.clientArea[4]
+	
+	local longPadding = options.horPaddingRight.value + options.horPaddingLeft.value
+	if options.vertical.value then
+		longSize, shortSize = shortSize, longSize
+		longPadding = 2*options.vertPadding.value
+	end
+	
+	longSize = longSize - longPadding
+	
+	buttonSizeShort = shortSize
+	buttonCountLimit = math.max(0, math.floor(longSize/(options.buttonSizeLong.value + options.buttonSpacing.value)))
+	if (buttonCountLimit + 1)*options.buttonSizeLong.value + buttonCountLimit*options.buttonSpacing.value < longSize then
+		buttonCountLimit = buttonCountLimit + 1
+	end
+	
+	CheckHide(true)
+	buttonList.UpdateLayout()
+end
+
+local function OptionsUpdateLayout()
+	if buttonHolder then
+		ButtonHolderResize(buttonHolder)
+	end
+end
+
+-------------------------------------------------------------------------------
+-------------------------------------------------------------------------------
+-- Widget options
+
+local defaultFacHotkeys = {
+	{key='Q', mod='alt+'},
+	{key='W', mod='alt+'},
+	{key='E', mod='alt+'},
+	{key='R', mod='alt+'},
+	{key='T', mod='alt+'},
+}
+
+options_path = 'Settings/HUD Panels/Quick Selection Bar'
+options_order = {  'showCoreSelector', 'vertical', 'buttonSizeLong', 'buttonFontScale', 'background_opacity', 'allowclickthrough', 'highlightidleconsinc', 'highlightidleconsincopacity', 'monitoridlecomms','monitoridlenano', 'monitorInbuiltCons', 'hideMissileSilos', 'showLaunchButton', 'showGBCButton', 'leftMouseCenter', 'lblSelectionIdle', 'selectprecbomber', 'selectidlecon', 'selectidlecon_all', 'lblSelection', 'selectcomm', 'horPaddingLeft', 'horPaddingRight', 'vertPadding', 'buttonSpacing', 'minButtonSpaces', 'specSpaceOverride', 'fancySkinning', 'leftsideofscreen'}
+options = {
+	showCoreSelector = {
+		name = 'Selection Bar Visibility',
+		type = 'radioButton',
+		value = 'specHide',
+		items = {
+			{key = 'always',    name = 'Always enabled'},
+			{key = 'specSpace', name = 'Only keep space when spectating'},
+			{key = 'specHide',  name = 'Hide when spectating'},
+			{key = 'never',     name = 'Always disabled'},
+		},
+		OnChange = CheckHide,
+		noHotkey = true,
+	},
+	vertical = {
+		name = 'Vertical Bar',
+		type = 'bool',
+		value = false,
+		noHotkey = true,
+		OnChange = OptionsUpdateLayout,
+	},
+	buttonSizeLong = {
+		name = 'Button Size',
+		type = 'number',
+		value = 58,
+		min = 10, max = 200, step = 1,
+		OnChange = OptionsUpdateLayout,
+	},
+	buttonFontScale = {
+		name = "Button Font Scale",
+		type = "number",
+		value = 1, min = 1, max = 3, step = 0.01,
+		OnChange = function ()
+			if buttonList then
+				buttonList.UpdateFontSizes()
+			end
+		end,
+	},
+	background_opacity = {
+		name = "Opacity",
+		type = "number",
+		value = 0, min = 0, max = 1, step = 0.01,
+		OnChange = function(self)
+			if mainBackground then
+				mainBackground.SetOpacity(self.value)
+				OptionsUpdateLayout()
+			end
+		end
+	},
+	allowclickthrough = {
+		name = 'Allow clicking through',
+		type='bool',
+		value=false,
+		desc = 'Mouse clicks through empty parts of the panel act on whatever is underneath.',
+		OnChange = function(self)
+			if mainBackground then
+				mainBackground.SetAllowClickThrough(self.value)
+			end
+		end,
+	},
+	highlightidleconsinc = {
+		name = 'Highlight idle constructors increases',
+		type = 'bool',
+		value = true,
+		noHotkey = true,
+	},
+	highlightidleconsincopacity = {
+		name = 'Highlight opacity',
+		type = 'number',
+		value = DEFAULT_IDLE_OPACITY,
+		min = 0.1, max = 1.0, step = 0.05,
+		OnChange = function(self)
+			SetButtonColorHighlight(self.value)
+		end,
+	},
+	monitoridlecomms = {
+		name = 'Track idle commanders',
+		type = 'bool',
+		value = true,
+		noHotkey = true,
+	},
+	monitoridlenano = {
+		name = 'Track idle nanotowers',
+		type = 'bool',
+		value = true,
+		noHotkey = true,
+	},
+	monitorInbuiltCons = {
+		name = 'Track constructors being built',
+		type = 'bool',
+		value = false,
+		noHotkey = true,
+	},
+	hideMissileSilos = {
+		name = 'Hide missile silo buttons',
+		desc = 'Hide the individual missile silo selection buttons. The Launch button already aggregates all silos, so the per-silo buttons are usually redundant.',
+		type = 'bool',
+		value = true,
+		noHotkey = true,
+		-- Rebuild the button list so existing silo buttons appear/disappear at once
+		-- (ClearData re-scans owned units; the old list is disposed next Update, same
+		-- as on a team change).
+		OnChange = function()
+			if buttonList then
+				ClearData()
+			end
+		end,
+	},
+	showLaunchButton = {
+		name = 'Show missile launch button',
+		desc = 'Show the aggregated missile Launch button, which opens the launcher to fire and build missiles.',
+		type = 'bool',
+		value = true,
+		noHotkey = true,
+		-- Toggling off should remove an existing button at once (it otherwise only
+		-- self-removes when the last missile is gone); rebuild to apply immediately.
+		OnChange = function()
+			if buttonList then
+				ClearData()
+			end
+		end,
+	},
+	showGBCButton = {
+		name = 'Show Global Build Command button',
+		desc = 'Show a button that toggles Global Build Command mode (same as its hotkey), highlighted while the mode is on, with the number of jobs you have queued.',
+		type = 'bool',
+		value = true,
+		noHotkey = true,
+		OnChange = function()
+			if buttonList then
+				ClearData()
+			end
+		end,
+	},
+	leftMouseCenter = {
+		name = 'Swap Camera Center Button',
+		desc = 'When enabled left click a commander or factory to center the camera on it. When disabled right click centers.',
+		type = 'bool',
+		value = false,
+		noHotkey = true,
+	},
+	lblSelectionIdle = { type='label', name='Idle Units', path='Hotkeys/Selection', },
+	selectprecbomber = { type = 'button',
+		name = 'Select idle precision bomber',
+		desc = 'Selects an idle, armed precision bomber. Use multiple times to select more. Deselects any units which are not idle, armed precision bombers.',
+		action = 'selectprecbomber',
+		path = 'Hotkeys/Selection',
+		dontRegisterAction = true,
+	},
+	selectidlecon = { type = 'button',
+		name = 'Select idle constructor',
+		desc = 'Selects an idle constructor. Use multiple times to select more. Deselects any units which are not idle constructors.',
+		action = 'selectidlecon',
+		path = 'Hotkeys/Selection',
+		dontRegisterAction = true,
+	},
+	selectidlecon_all = { type = 'button',
+		name = 'Select all idle constructors',
+		action = 'selectidlecon_all',
+		path = 'Hotkeys/Selection',
+		dontRegisterAction = true,
+	},
+	lblSelection = { type='label', name='Quick Selection Bar', path='Hotkeys/Selection', },
+	selectcomm = { type = 'button',
+		name = 'Select Commander',
+		action = 'selectcomm',
+		path = 'Hotkeys/Selection',
+		dontRegisterAction = true,
+	},
+	horPaddingLeft = {
+		name = 'Horizontal Padding Left',
+		type = 'number',
+		value = 0,
+		advanced = true,
+		min = 0, max = 100, step = 0.25,
+		OnChange = OptionsUpdateLayout,
+	},
+	horPaddingRight = {
+		name = 'Horizontal Padding Right',
+		type = 'number',
+		value = 0,
+		advanced = true,
+		min = 0, max = 100, step = 0.25,
+		OnChange = OptionsUpdateLayout,
+	},
+	vertPadding = {
+		name = 'Vertical Padding',
+		type = 'number',
+		value = 0,
+		advanced = true,
+		min = 0, max = 100, step = 0.25,
+		OnChange = OptionsUpdateLayout,
+	},
+	buttonSpacing = {
+		name = 'Button Spacing',
+		type = 'number',
+		value = 0,
+		advanced = true,
+		min = 0, max = 100, step = 0.25,
+		OnChange = OptionsUpdateLayout,
+	},
+	minButtonSpaces = {
+		name = 'Minimum Button Space',
+		type = 'number',
+		value = 0,
+		advanced = true,
+		min = 0, max = 16, step = 1,
+		OnChange = OptionsUpdateLayout,
+	},
+	specSpaceOverride = {
+		name = 'Spectating Space Override',
+		desc = 'Size of the spacer which is present while spectating with "Only keep space when spectating".',
+		type = 'number',
+		value = 50,
+		advanced = true,
+		min = 0, max = 400, step = 1,
+		OnChange = OptionsUpdateLayout,
+	},
+	fancySkinning = {
+		name = 'Fancy Skinning',
+		type = 'radioButton',
+		value = 'panel',
+		items = {
+			{key = 'panel', name = 'None'},
+			{key = 'panel_1100_small', name = 'Bottom Left',},
+			{key = 'panel_0110_small', name = 'Bottom Right'},
+		},
+		OnChange = function (self)
+			if mainBackground then
+				mainBackground.SetSkin(self.value)
+			end
+		end,
+		hidden = true,
+		noHotkey = true,
+	},
+	leftsideofscreen = {
+		name = 'Left side of screen',
+		type = 'bool',
+		value = true,
+		hidden = true,
+		noHotkey = true,
+		OnChange = OptionsUpdateLayout,
+	},
+}
+
+
+local standardFactoryTooltip =  "\n\255\0\255\0" .. WG.Translate("interface", "lmb") .. ": " .. (options.leftMouseCenter.value and WG.Translate("interface", "select_and_go_to") or WG.Translate("interface", "select")) .. "\n\255\0\255\0" .. WG.Translate("interface", "rmb") .. ": " .. ((not options.leftMouseCenter.value) and WG.Translate("interface", "select_and_go_to") or WG.Translate("interface", "select")) .. "\n\255\0\255\0" .. WG.Translate("interface", "shift") .. ": " .. WG.Translate("interface", "append_to_current_selection") .. "\008"
+
+--[[ local function debugIdleConsState()
+	echo("idleCons:")	
+	for uid in pairs(idleCons) do
+		echo(uid)
+	end
+	echo("idleTransports:")
+	for uid in pairs(idleTransports) do
+		echo(uid)
+	end
+	echo("consCarriedByEnemyTransports:")
+	for uid in pairs(consCarriedByEnemyTransports) do
+		echo(uid)
+	end
+	echo("fromConIDToCarryingTransportID:")
+	for uida, uidb in pairs(fromConIDToCarryingTransportID) do
+		echo(uida, uidb)
+	end
+	echo("fromTransportIDToCarriedConID: ")
+	for uida, uidb in pairs(fromTransportIDToCarriedConID) do
+		echo(uida, uidb)
+	end
+end ]]
+
+--------------------------------------------------------------------------------
+--------------------------------------------------------------------------------
+-- Selection Functions
+
+local function ConvertConIDToTransportIdCarryingItIfNeeded(unitID)
+	local transportID = fromConIDToCarryingTransportID[unitID]
+	return transportID or unitID
+end
+
+local function IsConNotCarriedByEnemyTransport(unitID)
+	return not consCarriedByEnemyTransports[unitID]
+end
+
+-- comm selection functionality
+local commIndex = 1
+local function SelectComm()
+	local commCount = #commanderList
+	if commCount <= 0 then
+		return
+	end
+	
+	-- This check deals with the case of spectators selecting
+	-- teams with different numbers of commanders.
+	if commCount < commIndex then
+		commIndex = commCount
+	end
+	
+	local unitID
+	-- Loop long enough to check every commander.
+	-- The most recently Ctrl+C selected commander is checked last.
+	-- Select the first non-selected commander encountered.
+	for i = 1, commCount do
+		unitID = commanderList[commIndex].unitID
+		commIndex = commIndex + 1
+		if commIndex > commCount then
+			commIndex = 1
+		end
+		if not Spring.IsUnitSelected(unitID) then
+			break
+		end
+	end
+	
+	local alt, ctrl, meta, shift = Spring.GetModKeyState()
+	unitID = ConvertConIDToTransportIdCarryingItIfNeeded(unitID)
+	Spring.SelectUnit(unitID, shift)
+	if not shift then
+		local x, y, z = Spring.GetUnitPosition(unitID)
+		SetCameraTarget(x, y, z)
+	end
+end
+
+local mapMiddle = {Game.mapSizeX / 2, 0, Game.mapSizeZ / 2}
+local function SelectPrecBomber()
+
+	-- Check to see if anything other than a ready bomber is selected
+	--	If not, then we'll increment the number of ready bombers selected
+	--	If so, then we'll either:
+	--		Select one ready bomber if none are selected
+	--		Select only the already selected ready bombers if at least one is selected
+	
+	local toBeSelected = {}
+	
+	local currentSelection = Spring.GetSelectedUnits()
+	local isAnythingElseSelected = nil
+	for i,uid in ipairs(currentSelection) do
+		if not readyUntaskedBombers[uid] then
+			isAnythingElseSelected = true
+			break
+		end
+	end
+	
+	local mx,my = spGetMouseState()
+	local pos = select(2, spTraceScreenRay(mx,my,true)) or mapMiddle
+	local mindist = math.huge
+	local muid = nil
+
+	for uid, v in pairs(readyUntaskedBombers) do
+		if (Spring.IsUnitSelected(uid)) then
+			table.insert(toBeSelected,uid)
+		else
+			local x,_,z = spGetUnitPosition(uid)
+			dist = (pos[1]-x)*(pos[1]-x) + (pos[3]-z)*(pos[3]-z)
+			if (dist < mindist) then
+				mindist = dist
+				muid = uid
+			end
+		end
+	end
+	if (muid ~= nil) and (not isAnythingElseSelected or #toBeSelected == 0) then
+		table.insert(toBeSelected,muid)
+	end
+	Spring.SelectUnitArray(toBeSelected)
+end
+
+-- A constructor Global Build Command's worker AI is managing isn't idle in the
+-- sense the idle constructor button means - it's waiting for a GBC job.
+local function IsGBCWorker(unitID)
+	local gbc = WG.GlobalBuildCommand
+	return gbc and gbc.IsControllingUnit and gbc.IsControllingUnit(unitID)
+end
+
+local function SelectIdleCon_all()
+	local consToSelect = {}
+	for uid in pairs(idleCons) do
+		if uid and uid ~= "count" and not IsGBCWorker(uid) then
+			if IsConNotCarriedByEnemyTransport(uid) then
+				consToSelect[ConvertConIDToTransportIdCarryingItIfNeeded(uid)] = true
+			end
+		end
+	end
+	if WG.SelectMapIgnoringRank then
+		WG.SelectMapIgnoringRank(consToSelect, select(4, Spring.GetModKeyState()))
+	else
+		Spring.SelectUnitMap(consToSelect, select(4, Spring.GetModKeyState()))
+	end
+end
+
+local conIndex = 1
+local function SelectIdleCon()
+	local shift = select(4, Spring.GetModKeyState())
+	if shift then
+		local mx,my = spGetMouseState()
+		local pos = select(2, spTraceScreenRay(mx,my,true)) or mapMiddle
+		local mindist = math.huge
+		local muid = nil
+
+		for uid, v in pairs(idleCons) do
+			if uid ~= "count" and not IsGBCWorker(uid) then
+				uid = ConvertConIDToTransportIdCarryingItIfNeeded(uid)
+				if (not Spring.IsUnitSelected(uid)) then
+					local x,_,z = spGetUnitPosition(uid)
+					dist = (pos[1]-x)*(pos[1]-x) + (pos[3]-z)*(pos[3]-z)
+					if (dist < mindist) then
+						mindist = dist
+						muid = uid
+					end
+				end
+			end
+		end
+
+		Spring.SelectUnit(muid, true)
+	else
+		if idleConCount == 0 then
+			Spring.SelectUnit(nil)
+		else
+			conIndex = (conIndex % idleConCount) + 1
+			local i = 1
+			for uid, v in pairs(idleCons) do
+				if uid ~= "count" and not IsGBCWorker(uid) then
+					if i == conIndex then
+						uid = ConvertConIDToTransportIdCarryingItIfNeeded(uid)
+						Spring.SelectUnit(uid)
+						local x, y, z = Spring.GetUnitPosition(uid)
+						SetCameraTarget(x, y, z)
+						return
+					else
+						i = i + 1
+					end
+				end
+			end
+		end
+	end
+end
+
+
+local function SelectFactory(index)
+	if factoryList[index] then
+		factoryList[index].SelectUnit()
+	end
+end
+
+local SELECT_FACTORY = "epic_chili_core_selector_select_factory_"
+
+-- Factory hotkeys
+local hotkeyPath = 'Hotkeys/Selection/Factory Selection'
+for i = 1, 16 do
+	local optionName = "select_factory_" .. i
+	options_order[#options_order + 1] = optionName
+	options[optionName] = {
+		name = "Select Factory " .. i,
+		desc = "Selects the factory in position " .. i .. " of the selection bar.",
+		type = 'button',
+		hotkey = defaultFacHotkeys[i],
+		path = hotkeyPath,
+		OnChange = function()
+			SelectFactory(i)
+		end
+	}
+end
+
+-- Missile launcher hotkey, registered like the factory-selection hotkeys above.
+-- Opens the launcher (same as clicking the Launch button in the selection bar).
+local LAUNCH_HOTKEY_ACTION = "epic_chili_core_selector_launch"
+-- Orange highlight matching the integral menu's selected-command colour, so the launch
+-- button reads as "active" while the launcher is open, like an armed command button.
+local LAUNCH_SELECTED_COLOR = {0.98, 0.48, 0.26, 0.85}
+
+-- Toggle the launcher: if it is already open, close it; otherwise open it and arm the
+-- default missile. Shared by the launch button click and the launch hotkey.
+local function OpenLauncher()
+	if not (WG.IntegralMenu and WG.IntegralMenu.OpenTab) then
+		return
+	end
+	if WG.IntegralMenu.IsHiddenTabOpen and WG.IntegralMenu.IsHiddenTabOpen("missiles") then
+		if WG.DismissLauncher then
+			WG.DismissLauncher()
+		elseif WG.IntegralMenu.CloseHiddenTab then
+			WG.IntegralMenu.CloseHiddenTab()
+		end
+		return
+	end
+	WG.IntegralMenu.OpenTab("missiles")
+	-- Arm a launch by default so the player can immediately click a target;
+	-- SelectDefaultMissile only picks a type that has a missile ready to fire.
+	if WG.SelectDefaultMissile then
+		WG.SelectDefaultMissile()
+	end
+end
+options_order[#options_order + 1] = "launch"
+options["launch"] = {
+	name = "Open missile launcher",
+	desc = "Opens the missile launcher, same as clicking the Launch button in the selection bar.",
+	type = 'button',
+	hotkey = {key = 'L', mod = 'alt+'},
+	path = 'Hotkeys/Selection',
+	OnChange = OpenLauncher,
+}
+
+--------------------------------------------------------------------------------
+--------------------------------------------------------------------------------
+-- Helper Functions
+
+local function GetHealthColor(fraction, wantString)
+	local midpt = (fraction > 0.5)
+	local r, g
+	if midpt then
+		r = ((1 - fraction)/0.5)
+		g = 1
+	else
+		r = 1
+		g = (fraction)/0.5
+	end
+	if wantString then
+		return string.char(255,math.floor(255*r),math.floor(255*g),0)
+	else
+		return {r, g, 0, 1}
+	end
+end
+
+-------------------------------------------------------------------------------
+-------------------------------------------------------------------------------
+-- Background Handling
+
+local function GetBackground(parent)
+	
+	local buttonCount = 0
+	local opacity = options.background_opacity.value
+	local visible = true
+	local specShowMode = false
+	local specShow = false
+	
+	local buttonsPanel = Control:New{
+		x = 0,
+		y = 0,
+		right = 0,
+		bottom = 0,
+		padding = {0, 0, 0, 0},
+		itemMargin = {0, 0, 0, 0},
+		parent = parent,
+	}
+	
+	local backgroundPanel = Panel:New{
+		name = "core_backgroundPanel",
+		classname = options.fancySkinning.value,
+		x = "5%",
+		draggable = false,
+		resizable = false,
+		backgroundColor = {1, 1, 1, opacity},
+		noClickThrough = not options.allowclickthrough.value,
+		parent = parent,
+	}
+	
+	local externalFunctions = {}
+	
+	function externalFunctions.GetButtonsHolder()
+		return buttonsPanel
+	end
+	
+	function externalFunctions.SetAllowClickThrough(allowClickThrough)
+		backgroundPanel.noClickThrough = not allowClickThrough
+	end
+	
+	function externalFunctions.SetSkin(className)
+		local currentSkin = Chili.theme.skin.general.skinName
+		local skin = Chili.SkinHandler.GetSkin(currentSkin)
+
+		if specShowMode and className ~= "panel" then
+			className = "panel_0100"
+		end
+		
+		local newClass = skin.panel
+		if className and skin[className] then
+			newClass = skin[className]
+		end
+		
+		backgroundPanel.classname = className
+		backgroundPanel.tiles = newClass.tiles
+		backgroundPanel.TileImageFG = newClass.TileImageFG
+		--backgroundPanel.backgroundColor = newClass.backgroundColor
+		backgroundPanel.TileImageBK = newClass.TileImageBK
+		backgroundPanel:Invalidate()
+	end
+
+	function externalFunctions.UpdateSize(newButtonCount)
+		buttonCount = newButtonCount or buttonCount
+		
+		local buttons = math.min(buttonCountLimit, math.max(buttonCount, options.minButtonSpaces.value))
+		
+		local size = buttons*options.buttonSizeLong.value + (buttons - 1)*options.buttonSpacing.value
+		-- Extra room for the launch button, which grows past one normal button.
+		size = size + launchButtonExtraLong
+		if options.vertical.value then
+			size = size + 2*options.vertPadding.value
+		else
+			size = size + options.horPaddingRight.value + options.horPaddingLeft.value
+		end
+		
+		if specShowMode then
+			size = options.specSpaceOverride.value
+		end
+		
+		if options.vertical.value then
+			backgroundPanel._relativeBounds.left = 0
+			backgroundPanel._relativeBounds.right = 0
+			backgroundPanel._relativeBounds.top = nil
+			backgroundPanel._givenBounds.top = nil
+			backgroundPanel._relativeBounds.bottom = 0
+			backgroundPanel._relativeBounds.width = nil
+			backgroundPanel._relativeBounds.height = size
+			backgroundPanel:UpdateClientArea()
+		else
+			backgroundPanel._relativeBounds.left = 0
+			backgroundPanel._relativeBounds.right = nil
+			backgroundPanel._relativeBounds.top = 0
+			backgroundPanel._givenBounds.top = 0
+			backgroundPanel._relativeBounds.bottom = 0
+			backgroundPanel._relativeBounds.width = size
+			backgroundPanel._relativeBounds.height = nil
+			backgroundPanel:UpdateClientArea()
+		end
+	end
+	
+	function externalFunctions.SetVisible(newVisible)
+		if newVisible == visible then
+			return
+		end
+		visible = newVisible
+		if visible then
+			backgroundPanel:SetVisibility(true)
+			backgroundPanel:SendToBack()
+			externalFunctions.UpdateSize()
+		else
+			backgroundPanel:SetVisibility(false)
+		end
+	end
+	
+	function externalFunctions.SetOpacity(newOpacity)
+		opacity = newOpacity
+		backgroundPanel.backgroundColor[4] = opacity
+		backgroundPanel:Invalidate()
+	end
+	
+	function externalFunctions.UpdateSpecShowMode(newSpecShowMode, forceUpdate)
+		if (not forceUpdate) and (newSpecShowMode == specShowMode) then
+			return
+		end
+		specShowMode = newSpecShowMode
+		if options.fancySkinning.value ~= "panel" then
+			externalFunctions.SetSkin(options.fancySkinning.value)
+		end
+		
+		externalFunctions.UpdateSize()
+		if specShowMode then
+			externalFunctions.SetVisible(specShow)
+			if options.leftsideofscreen.value then
+				mainWindow.padding[1] = -1
+				mainWindow.padding[3] = 3
+			else
+				mainWindow.padding[1] = 3
+				mainWindow.padding[3] = -1
+			end
+		else
+			mainWindow.padding[1] = -1
+			mainWindow.padding[3] = -1
+		end
+		mainWindow:UpdateClientArea()
+	end
+	
+	function externalFunctions.UpdateSpecSpace(newSpecShow)
+		if newSpecShow == specShow then
+			return
+		end
+		specShow = newSpecShow
+		if specShowMode then
+			externalFunctions.SetVisible(specShow)
+		end
+	end
+	
+	function externalFunctions.GetSpecMode()
+		return specShowMode
+	end
+	
+	return externalFunctions
+end
+
+--------------------------------------------------------------------------------
+--------------------------------------------------------------------------------
+-- Button Handling
+
+-- getLongSize (optional): returns the button's extent along the long axis. Only
+-- affects this button's own size, not the offset of following buttons, so it is
+-- only safe to grow the last button (the launch button). Defaults to the normal
+-- button size.
+local function GetNewButton(parent, onClick, category, index, backgroundColor, imageFile, imageFile2, getLongSize)
+	local position = 1
+	
+	local hotkeyLabel, buildProgress, repeatImage, healthBar, hotkeyText, bottomLabel
+	
+	-- Controls
+	local button = Button:New{
+		parent = parent,
+		x = "5%", -- Makes the button relative
+		y = "5%",
+		right = "5%",
+		bottom = "5%",
+		noFont = true,
+		padding = {1,1,1,1},
+		backgroundColor = backgroundColor,
+		OnClick = {
+			function (self, x, y, mouse)
+				local _, _, meta, shift = Spring.GetModKeyState()
+				if meta then
+					WG.crude.OpenPath(options_path)
+					WG.crude.ShowMenu()
+					return true
+				end
+				onClick(mouse)
+			end
+		},
+	}
+	
+	local image = Image:New {
+		parent = button,
+		x = "5%",
+		y = "5%",
+		right = "5%",
+		bottom = "5%",
+		file = imageFile,
+		file2 = imageFile2,
+		keepAspect = false,
+	}
+	
+	local externalFunctions = {}
+
+	-- Exposes the button control and its image so specialised buttons (e.g. the
+	-- launch button) can parent extra content onto them.
+	function externalFunctions.GetButtonControl()
+		return button, image
+	end
+
+	-- Update attributes
+	function externalFunctions.SetImage(newImageFile)
+		image.file = newImageFile
+		image:Invalidate()
+	end
+	
+	function externalFunctions.SetImageColor(color)
+		image.color = color
+		image:Invalidate()
+	end
+	
+	function externalFunctions.SetBackgroundColor(newBackgroundColor)
+		button.backgroundColor = newBackgroundColor
+		button:Invalidate()
+	end
+	
+	function externalFunctions.SetProgress(newProgress)
+		if not buildProgress then
+			buildProgress = Progressbar:New{
+				x = "8%",
+				y = "8%",
+				width = "85%",
+				height = "85%",
+				max = 1,
+				caption = false,
+				noFont = true,
+				skin = nil,
+				skinName = 'default',
+				color = {0.7, 0.7, 0.4, 0.6},
+				backgroundColor = {1, 1, 1, 0.01},
+				parent = image,
+			}
+		end
+		buildProgress:SetValue(newProgress)
+	end
+	
+	function externalFunctions.SetRepeat(newRepeat)
+		if not repeatImage then
+			repeatImage = Image:New {
+				x = "55%",
+				y = "10%",
+				width = "40%",
+				height = "40%",
+				file = IMAGE_REPEAT,
+				keepAspect = true,
+				parent = image,
+			}
+		end
+		repeatImage.file = (newRepeat and IMAGE_REPEAT) or nil
+		repeatImage:Invalidate()
+	end
+	
+	function externalFunctions.SetHealthbar(newHealth)
+		if not newHealth then
+			if healthBar then
+				healthBar:SetVisibility(false)
+			end
+			return
+		end
+		local color = GetHealthColor(newHealth)
+		if not healthBar then
+			healthBar = Progressbar:New{
+				x       = 0,
+				y       = "85%",
+				width   = "100%",
+				height  = "15%",
+				max     = 1,
+				caption = false,
+				noFont = true,
+				color   = {0,0.8,0,1},
+				parent  = image,
+			}
+		end
+		healthBar:SetVisibility(true)
+		healthBar.color = color
+		healthBar:SetValue(newHealth)
+	end
+
+	function externalFunctions.SetTooltip(newTooltip)
+		button.tooltip = newTooltip
+		button:Invalidate()
+	end
+
+	function externalFunctions.SetHotkey(newHotkeyText)
+		if newHotkeyText == hotkeyText then
+			return
+		end
+		hotkeyText = newHotkeyText
+		if not hotkeyLabel then
+			hotkeyLabel = Label:New {
+				x = 2,
+				y = 3,
+				right = 0,
+				bottom = 0,
+				autosize = false,
+				align = "left",
+				valign = "top",
+				caption = '\255\0\255\0' .. hotkeyText,
+				objectOverrideFont = WG.GetFont(math.floor(HOTKEY_FONT_SIZE*options.buttonFontScale.value + 0.5)),
+				fontShadow = true,
+				parent = button
+			}
+			hotkeyLabel:BringToFront()
+		end
+		hotkeyLabel:SetCaption('\255\0\255\0' .. hotkeyText)
+	end
+	
+	function externalFunctions.SetBottomLabel(caption)
+		if not bottomLabel then
+			bottomLabel = Label:New {
+				x = 0,
+				y = 0,
+				right = 5,
+				bottom = 5,
+				align = "right",
+				valign = "bottom",
+				caption = caption,
+				objectOverrideFont = WG.GetFont(math.floor(BOTTOM_RIGHT_FONT_SIZE*options.buttonFontScale.value + 0.5)),
+				autosize = false,
+				fontShadow = true,
+				parent = image,
+			}
+		end
+		bottomLabel:SetCaption(caption)
+	end
+	
+	-- Movement
+	function externalFunctions.UpdatePosition()
+		if position > buttonCountLimit then
+			button:SetVisibility(false)
+			return
+		end
+		button:SetVisibility(true)
+		
+		local hPad = ((not options.vertical.value) and options.buttonSpacing.value) or 0
+		local vPad = (options.vertical.value and options.buttonSpacing.value) or 0
+		
+		local index = position - 1
+		-- Offset uses the normal button size (all preceding buttons are normal);
+		-- only this button's own extent may be larger, via getLongSize.
+		local longSize = (getLongSize and getLongSize()) or options.buttonSizeLong.value
+		if options.vertical.value then
+			button._relativeBounds.left = options.horPaddingLeft.value
+			button._relativeBounds.right = options.horPaddingRight.value
+			button._relativeBounds.top = nil
+			button._givenBounds.top = nil
+			button._relativeBounds.bottom = index*(options.buttonSizeLong.value + options.buttonSpacing.value) + options.vertPadding.value
+			button._relativeBounds.width = nil
+			button._givenBounds.width = nil
+			button._relativeBounds.height = longSize
+			button:UpdateClientArea()
+		else
+			button._relativeBounds.left = index*(options.buttonSizeLong.value + options.buttonSpacing.value) + options.horPaddingLeft.value
+			button._relativeBounds.right = nil
+			button._givenBounds.right = nil
+			button._relativeBounds.top = options.vertPadding.value
+			button._givenBounds.top = options.vertPadding.value
+			button._relativeBounds.bottom = options.vertPadding.value
+			button._relativeBounds.width = longSize
+			button._relativeBounds.height = nil
+			button._givenBounds.height = nil
+			button:UpdateClientArea()
+		end
+	end
+	
+	function externalFunctions.SetPosition(newPosition)
+		position = newPosition
+		externalFunctions.UpdatePosition()
+	end
+	
+	function externalFunctions.GetPosition()
+		return position
+	end
+	
+	function externalFunctions.UpdateFontSize()
+		if hotkeyLabel then
+			hotkeyLabel.font = WG.GetFont(math.floor(HOTKEY_FONT_SIZE*options.buttonFontScale.value + 0.5))
+			hotkeyLabel:Invalidate()
+		end
+		if bottomLabel then
+			bottomLabel.font = WG.GetFont(math.floor(BOTTOM_RIGHT_FONT_SIZE*options.buttonFontScale.value + 0.5)),
+			bottomLabel:Invalidate()
+		end
+	end
+	
+	function externalFunctions.MoveUp(compCategory, compIndex)
+		if compCategory < category or (compCategory == category and compIndex < index) then
+			externalFunctions.SetPosition(position + 1)
+			return true
+		else
+			return false -- Button did not move
+		end
+	end
+	
+	function externalFunctions.MoveDown(compCategory, compIndex)
+		if compCategory < category or (compCategory == category and compIndex < index) then
+			externalFunctions.SetPosition(position - 1)
+			return true -- Button moved
+		else
+			return false -- Button did not move
+		end
+	end
+	
+	function externalFunctions.GetOrder()
+		return category, index
+	end
+	
+	function externalFunctions.SetImageVisible(newVisible)
+		image:SetVisibility(newVisible)
+	end
+	
+	-- Desctruction
+	function externalFunctions.Destroy()
+		button:Dispose()
+		button = nil
+	end
+	
+	return externalFunctions
+end
+
+--------------------------------------------------------------------------------
+--------------------------------------------------------------------------------
+-- Factory Handling
+
+local function GetFactoryButton(parent, unitID, unitDefID, categoryOrder)
+	
+	local function OnClick(mouse)
+		local alt, ctrl, meta, shift = Spring.GetModKeyState()
+		Spring.SelectUnit(unitID, shift)
+		if mouse == ((options.leftMouseCenter.value and 1) or 3) then
+			local x, y, z = Spring.GetUnitPosition(unitID)
+			SetCameraTarget(x, y, z)
+		end
+	end
+	
+	local constructionDefID
+	local buildProgress
+	local repeatState
+	
+	local button = GetNewButton(
+		parent,
+		OnClick,
+		FACTORY_ORDER,
+		categoryOrder,
+		BUTTON_COLOR_FACTORY,
+		'#' .. unitDefID,
+		FACTORY_FRAME
+	)
+	
+	local function UpdateConstruction(newConstructionDefID)
+		if newConstructionDefID == constructionDefID then
+			return
+		end
+		constructionDefID = newConstructionDefID
+		button.SetImage('#' .. (constructionDefID or unitDefID))
+	end
+	
+	local function UpdateBuildProgress(newBuildProgress)
+		if newBuildProgress == buildProgress then
+			return
+		end
+		buildProgress = newBuildProgress
+		button.SetProgress(buildProgress)
+	end
+	
+	local function UpdateRepeat(newRepeat)
+		if newRepeat == repeatState then
+			return
+		end
+		repeatState = newRepeat
+		button.SetRepeat(repeatState)
+	end
+	
+	local oldConstructionCount, oldConstructionDefID, oldBuildProgress
+	local function UpdateTooltip(constructionCount)
+		if constructionCount == oldConstructionCount and constructionDefID == oldConstructionDefID and buildProgress == oldBuildProgress then
+			return
+		end
+		oldConstructionCount, oldConstructionDefID, oldBuildProgress = constructionCount, constructionDefID, buildProgress
+		
+		local tooltip = WG.Translate("interface", "factory") .. ": ".. Spring.Utilities.GetHumanName(UnitDefs[unitDefID]) .. "\n" .. WG.Translate("interface", "x_units_in_queue", {count = constructionCount})
+		if repeatState then
+			tooltip = tooltip .. "\255\0\255\255 (" .. WG.Translate("interface", "repeating") .. ")\008"
+		end
+		if constructionDefID then
+			tooltip = tooltip .. "\n" .. WG.Translate("interface", "current_project") .. ": " .. Spring.Utilities.GetHumanName(UnitDefs[constructionDefID]) .. " (".. WG.Translate("interface", "x%_done", {x = math.floor(buildProgress*100)}) .. ")"
+		end
+		tooltip = tooltip .. standardFactoryTooltip
+		
+		button.SetTooltip(tooltip)
+	end
+	
+	local externalFunctions = {
+		unitID = unitID,
+		GetOrder = button.GetOrder,
+		UpdatePosition = button.UpdatePosition,
+		SetImageVisible = button.SetImageVisible,
+		UpdateFontSize = button.UpdateFontSize,
+	}
+	
+	function externalFunctions.UpdateButton()
+		if not Spring.ValidUnitID(unitID) then
+			return false
+		end
+		
+		-- Update progress and construction
+		local buildeeID = Spring.GetUnitIsBuilding(unitID)
+		if buildeeID then
+			local progress = select(5, Spring.GetUnitHealth(buildeeID))
+			local buildeeDefID = Spring.GetUnitDefID(buildeeID)
+			UpdateConstruction(buildeeDefID)
+			UpdateBuildProgress(progress)
+		else
+			UpdateConstruction()
+			UpdateBuildProgress(0)
+		end
+		
+		-- Update repeat
+		UpdateRepeat(Spring.Utilities.GetUnitRepeat(unitID))
+		
+		-- Update tooltip
+		local queue = Spring.GetFullBuildQueue(unitID) or {}
+		local constructionCount = 0
+		for i = 1, #queue do
+			local udid, num = next(queue[i])
+			constructionCount = constructionCount + num
+		end
+
+		UpdateTooltip(constructionCount)
+		return true
+	end
+	
+	function externalFunctions.UpdateHotkey()
+		local factoryPos = button.GetPosition() - (#commanderList + 1)
+		button.SetHotkey(WG.crude.GetHotkey(SELECT_FACTORY .. factoryPos) or '')
+	end
+	
+	function externalFunctions.SetPosition(position)
+		button.SetPosition(position)
+		externalFunctions.UpdateHotkey()
+	end
+	
+	function externalFunctions.MoveUp(category, index)
+		local moved = button.MoveUp(category, index)
+		if moved then
+			externalFunctions.UpdateHotkey()
+		end
+		return moved
+	end
+	
+	function externalFunctions.MoveDown(category, index)
+		local moved = button.MoveDown(category, index)
+		if moved then
+			externalFunctions.UpdateHotkey()
+		end
+		return moved
+	end
+	
+	function externalFunctions.SelectUnit()
+		OnClick()
+	end
+	
+	function externalFunctions.Destroy()
+		button.Destroy()
+		button = nil
+	end
+	
+	externalFunctions.UpdateButton()
+	externalFunctions.UpdateHotkey()
+	
+	return externalFunctions
+end
+
+--------------------------------------------------------------------------------
+--------------------------------------------------------------------------------
+-- Commander Handling
+
+local function GetCommanderButton(parent, unitID, unitDefID, categoryOrder)
+
+	local function OnClick(mouse)
+		Spring.SelectUnit(unitID, shift)
+		if mouse == ((options.leftMouseCenter.value and 1) or 3) then
+			local x, y, z = Spring.GetUnitPosition(unitID)
+			SetCameraTarget(x, y, z)
+		end
+	end
+	
+	local healthProp, health, maxHealth = 1, 1, 1
+	local warningTime = false
+	local warningPhase = true
+	
+	local button = GetNewButton(
+		parent,
+		OnClick,
+		COMMANDER_ORDER,
+		categoryOrder,
+		BUTTON_COLOR,
+		'#' .. unitDefID
+	)
+	
+	local function UpdateHealth(newHealthProp)
+		if newHealthProp == healthProp then
+			return
+		end
+		healthProp = newHealthProp
+		button.SetHealthbar(healthProp ~= 1 and healthProp)
+	end
+	
+	local oldHealth, oldMaxHealth
+	local function UpdateTooltip()
+		if health == oldHealth and maxHealth == oldMaxHealth then
+			return
+		end
+		oldHealth, oldMaxHealth = health, maxHealth
+		local tooltip = WG.Translate("interface", "commander") .. ": " .. Spring.Utilities.GetHumanName(UnitDefs[unitDefID], unitID) ..
+			"\n\255\0\255\255" .. WG.Translate("interface", "health") .. ":\008 "..GetHealthColor(health/maxHealth, true)..math.floor(health).."/"..maxHealth.."\008"..
+			"\n\255\0\255\0" .. WG.Translate("interface", "lmb") .. ": " .. (options.leftMouseCenter.value and WG.Translate("interface", "select_and_go_to") or WG.Translate("interface", "select")) ..
+			"\n\255\0\255\0" .. WG.Translate("interface", "rmb") .. ": " .. ((not options.leftMouseCenter.value) and WG.Translate("interface", "select_and_go_to") or WG.Translate("interface", "select")) ..
+			"\n\255\0\255\0" .. WG.Translate("interface", "shift") .. ": " .. WG.Translate("interface", "append_to_current_selection") .. "\008"
+	
+		button.SetTooltip(tooltip)
+	end
+	
+	local externalFunctions = {
+		unitID = unitID,
+		SetPosition = button.SetPosition,
+		MoveUp = button.MoveUp,
+		MoveDown = button.MoveDown,
+		GetOrder = button.GetOrder,
+		UpdatePosition = button.UpdatePosition,
+		SetImageVisible = button.SetImageVisible,
+		UpdateFontSize = button.UpdateFontSize,
+	}
+	
+	function externalFunctions.UpdateButton(dt)
+		if not Spring.ValidUnitID(unitID) then
+			return false
+		end
+		
+		health, maxHealth = spGetUnitHealth(unitID)
+		if not health then
+			return false
+		end
+		UpdateHealth(health/maxHealth)
+		
+		if warningTime then
+			warningTime = warningTime - dt
+			if warningTime <= 0 then
+				warningTime = false
+				warningPhase = false
+			else
+				warningPhase = not warningPhase
+			end
+			
+			button.SetBackgroundColor((warningPhase and BUTTON_COLOR_WARNING) or BUTTON_COLOR)
+		end
+		
+		UpdateTooltip()
+		return true
+	end
+	
+	function externalFunctions.UpdateHotkey()
+		button.SetHotkey(WG.crude.GetHotkey("selectcomm") or '')
+	end
+	
+	function externalFunctions.SetWarning(newWarningTime)
+		warningTime = newWarningTime
+	end
+	
+	function externalFunctions.Destroy()
+		button.Destroy()
+		button = nil
+	end
+	
+	externalFunctions.UpdateButton(0)
+	externalFunctions.UpdateHotkey()
+	
+	return externalFunctions
+end
+
+--------------------------------------------------------------------------------
+--------------------------------------------------------------------------------
+-- Constructor Handling
+
+local function GetConstructorButton(parent)
+
+	local function OnClick(mouse)
+		if mouse == 1 then
+			SelectIdleCon()
+		elseif mouse == 3 and idleConCount > 0 then
+			SelectIdleCon_all()
+		end
+	end
+	
+	local active = true
+	local highlightTime = false
+	local highlightPhase = true
+	
+	local button = GetNewButton(
+		parent,
+		OnClick,
+		CONSTRUCTOR_ORDER,
+		0,
+		BUTTON_COLOR,
+		BUILD_ICON_ACTIVE
+	)
+	
+	local function SetActive(newActive)
+		if newActive == active then
+			return
+		end
+		active = newActive
+		button.SetImage((active and BUILD_ICON_ACTIVE) or BUILD_ICON_DISABLED)
+		button.SetImageColor(((not active) and IMAGE_COLOR_DISABLED) or nil)
+		button.SetBackgroundColor((active and BUTTON_COLOR) or BUTTON_COLOR_DISABLED)
+	end
+	
+	local externalFunctions = {
+		SetPosition = button.SetPosition,
+		MoveUp = button.MoveUp,
+		MoveDown = button.MoveDown,
+		GetOrder = button.GetOrder,
+		UpdatePosition = button.UpdatePosition,
+		SetImageVisible = button.SetImageVisible,
+		UpdateFontSize = button.UpdateFontSize,
+	}
+	
+	local oldTotal
+	function externalFunctions.UpdateButton(dt)
+		if options.highlightidleconsinc.value and highlightTime then
+			highlightTime = highlightTime - dt
+			if highlightTime <= 0 then
+				highlightTime = false
+				highlightPhase = false
+			else
+				highlightPhase = not highlightPhase
+			end
+			
+			button.SetBackgroundColor((highlightPhase and buttonColorHighlight) or BUTTON_COLOR)
+		end
+		
+		local total = 0
+		for unitID in pairs(idleCons) do
+			local transportID = fromConIDToCarryingTransportID[unitID]
+			-- only count idle constructors that aren't being carried by busy
+			-- transports, or managed by Global Build Command
+			if not (transportID and (not idleTransports[transportID])) and not IsGBCWorker(unitID) then
+				total = total + 1
+			end
+		end
+		idleConCount = total
+		
+		if total == oldTotal then
+			return true
+		end
+		if options.highlightidleconsinc.value and oldTotal ~= nil and oldTotal < total then
+			highlightTime = IDLE_CONS_HIGHLIGHT_TIME
+		else
+			highlightTime = false
+		end
+		oldTotal = total
+		
+		button.SetTooltip(WG.Translate("interface", "idle_cons", {count = total}) ..
+						"\n\255\0\255\0" .. WG.Translate("interface", "lmb") .. ": " .. WG.Translate("interface", "select") ..
+						"\n\255\0\255\0" .. WG.Translate("interface", "rmb") .. ": " .. WG.Translate("interface", "select_all") .. "\008")
+
+		SetActive(total > 0)
+		button.SetBottomLabel(tostring(total))
+		
+		return true
+	end
+	
+	function externalFunctions.UpdateHotkey()
+		local hotkeyCaption
+		if WG.crude.GetHotkey("selectidlecon") and WG.crude.GetHotkey("selectidlecon_all") then
+			hotkeyCaption = WG.crude.GetHotkey("selectidlecon") .. "\n" .. WG.crude.GetHotkey("selectidlecon_all")
+		else
+			hotkeyCaption = (WG.crude.GetHotkey("selectidlecon") or WG.crude.GetHotkey("selectidlecon_all") or '')
+		end
+		button.SetHotkey(hotkeyCaption)
+	end
+	
+	function externalFunctions.Destroy()
+		button.Destroy()
+		button = nil
+	end
+	
+	externalFunctions.UpdateButton(dt)
+	externalFunctions.UpdateHotkey()
+
+	return externalFunctions
+end
+
+-------------------------------------------------------------------------------
+-------------------------------------------------------------------------------
+-- Launch button
+--
+-- A single aggregate button that shows every stockpiled or building missile
+-- type in a 2-column grid. Each cell arms that missile's launch command via the
+-- missile widget. Added while missiles exist and self-removes (UpdateButton
+-- returns false) once there are none.
+--
+-- The button holds a minimum 2x2 grid (one normal button size) and grows along
+-- its long axis past that. A single missile fills the whole button; with two or
+-- more, cells keep a fixed half-button size and are not stretched to fill.
+
+local LAUNCH_COLUMNS = 2
+local LAUNCH_ROWS_MIN = 2
+-- Count label font size for a standard (2-column) cell; it scales up with the
+-- cell when there are fewer columns (a single missile fills the whole button).
+local LAUNCH_LABEL_FONT = 12
+
+local function GetLaunchButton(parent)
+	-- Clicking anywhere on the button opens the launcher (shared with the launch hotkey).
+	local function OnClick(mouse)
+		OpenLauncher()
+	end
+
+	local function GetLongSize()
+		return options.buttonSizeLong.value + launchButtonExtraLong
+	end
+
+	local button = GetNewButton(parent, OnClick, LAUNCH_ORDER, 0, BUTTON_COLOR, nil, nil, GetLongSize)
+	local buttonControl = button.GetButtonControl()
+	local defaultFocusColor = buttonControl.focusColor -- restore this when not highlighted
+	button.SetImageVisible(false) -- the missile grid replaces the single icon
+
+	local cells = {}
+	local lastLayoutKey = false
+	local lastHotkey = false       -- last hotkey string pushed to the label/tooltip
+	local lastLauncherActive = nil -- last launch-active state pushed to the focus colour
+
+	-- Cells are display only (icon + count + build progress); they are parented
+	-- directly to the button and do not handle clicks, so the whole button stays
+	-- clickable and opens the launcher menu.
+	local function GetCell(i)
+		if cells[i] then
+			return cells[i]
+		end
+		local cell = {}
+		cell.image = Image:New {
+			parent = buttonControl,
+			keepAspect = false,
+			file = "",
+		}
+		cell.bar = Progressbar:New {
+			parent = cell.image,
+			x = "5%", y = "5%", right = "5%", bottom = "5%",
+			value = 0, max = 1, caption = false, noFont = true,
+			color = {0.7, 0.7, 0.4, 0.6},
+			backgroundColor = {1, 1, 1, 0.01},
+		}
+		-- Parented to the image (not the button) so the count always draws on top of
+		-- the icon and its progress bar. Position and shadow match the standard bottom
+		-- count label (SetBottomLabel, used by the idle-con/factory buttons) so a single
+		-- missile's count reads identically.
+		cell.label = Label:New {
+			parent = cell.image,
+			x = 0, y = 0, right = 5, bottom = 5,
+			autosize = false,
+			align = "right", valign = "bottom",
+			objectOverrideFont = WG.GetFont(LAUNCH_LABEL_FONT),
+			fontShadow = true,
+			caption = "",
+		}
+		cells[i] = cell
+		return cell
+	end
+
+	local externalFunctions = {
+		SetPosition = button.SetPosition,
+		MoveUp = button.MoveUp,
+		MoveDown = button.MoveDown,
+		GetOrder = button.GetOrder,
+		UpdatePosition = button.UpdatePosition,
+	}
+
+	-- Keep the single base icon hidden; the grid is drawn from cell controls.
+	function externalFunctions.SetImageVisible()
+	end
+
+	function externalFunctions.UpdateButton(dt)
+		local icons = WG.missileActiveIcons or {}
+		local n = #icons
+		if n == 0 then
+			-- No missiles: reset any growth and report inactive so the list handler
+			-- removes the button.
+			if launchButtonExtraLong ~= 0 then
+				launchButtonExtraLong = 0
+				wantLaunchRelayout = true
+			end
+			return false
+		end
+
+		-- A single missile fills the whole button (a 1x1 grid over the full 2x2
+		-- space); two or more use the 2-column grid with a 2x2 minimum.
+		local singleCell = (n == 1)
+
+		-- Show the hotkey in the corner only when a single cell leaves room for it
+		-- (one missile, or the silo placeholder); with a full grid it would cover a
+		-- cell, so it lives in the tooltip instead. The tooltip always carries it.
+		local hk = (WG.crude and WG.crude.GetHotkey(LAUNCH_HOTKEY_ACTION)) or ''
+		if hk ~= lastHotkey then
+			lastHotkey = hk
+			button.SetTooltip("Missile launcher" .. ((hk ~= '') and (" (" .. hk .. ")") or ""))
+		end
+		button.SetHotkey(singleCell and hk or '')
+		local cols = singleCell and 1 or LAUNCH_COLUMNS
+		local rows = math.max(1, math.ceil(n / cols))
+
+		-- A normal button holds two rows (two columns); each further row adds half
+		-- a button length. Grow the button, and the panel, past two rows.
+		local desiredLong = math.max(options.buttonSizeLong.value, rows * options.buttonSizeLong.value / 2)
+		local extra = desiredLong - options.buttonSizeLong.value
+		if extra ~= launchButtonExtraLong then
+			launchButtonExtraLong = extra
+			-- Resize the button and background panel right here, so the taller
+			-- button and the cell grid below update together in the same pass
+			-- instead of a frame apart (the button is the last one, so growing it
+			-- does not shift any other button's offset).
+			button.UpdatePosition()
+			if mainBackground then
+				mainBackground.UpdateSize()
+			end
+		end
+
+		-- The long axis (height when vertical, width when horizontal) was just
+		-- changed via UpdatePosition, but the control's realized width/height only
+		-- catches up on a later Chili pass. Use the computed size for that axis so
+		-- the cells land at their final positions in the same frame the button
+		-- grows, with no lag; the short axis is fixed by padding and safe to read.
+		local width, height
+		if options.vertical.value then
+			width = buttonControl.width or 0
+			height = desiredLong
+		else
+			width = desiredLong
+			height = buttonControl.height or 0
+		end
+
+		-- With two or more missiles, divide by the minimum grid (2x2) so a single
+		-- row keeps its half-button height instead of stretching. A single missile
+		-- (cols == 1) fills the whole button.
+		local cw = width / cols
+		local ch = height / (singleCell and 1 or math.max(LAUNCH_ROWS_MIN, rows))
+
+		-- Reposition cells only when the missile set or grid size changes, not on
+		-- every count/progress tick. Re-running SetPos each frame re-lays out the
+		-- cell labels and makes the count jitter vertically while a missile builds.
+		local iconParts = {}
+		for i = 1, n do
+			iconParts[i] = icons[i].icon
+		end
+		local layoutKey = table.concat(iconParts, ",") .. "|" .. cols .. "|" .. width .. "x" .. height
+		if layoutKey ~= lastLayoutKey then
+			lastLayoutKey = layoutKey
+			-- Count font: a single cell fills the whole button, so use the standard
+			-- idle-con / factory count size (14) rather than scaling up. Multiple cells
+			-- keep the per-cell scaled size (a wider cell gets a bigger number).
+			local baseCellWidth = width / LAUNCH_COLUMNS
+			local labelFont = WG.GetFont(singleCell and 14
+				or math.max(1, math.floor(LAUNCH_LABEL_FONT * cw / baseCellWidth + 0.5)))
+			for i = 1, n do
+				local cell = GetCell(i)
+				local col = (i - 1) % cols
+				local row = math.floor((i - 1) / cols)
+				local cx, cy = col * cw, row * ch
+				-- A single cell (one missile, or the silo placeholder) is inset 5% to
+				-- match the normal buttons' icon padding, so its icon and its count
+				-- label line up exactly with the idle-con / factory buttons (whose image
+				-- is inset 5% inside the button). Grid cells (2+ missiles) stay flush so
+				-- the tiles pack tightly.
+				if singleCell or icons[i].isSilo then
+					local ix, iy = cw * 0.05, ch * 0.05
+					cell.image:SetPos(cx + ix, cy + iy, cw - 2 * ix, ch - 2 * iy)
+				else
+					cell.image:SetPos(cx, cy, cw, ch)
+				end
+				cell.image:SetVisibility(true)
+				cell.image.file = icons[i].icon
+				-- Silo placeholder (no missiles yet) gets the factory construction
+				-- border to read as "build here"; missiles show without it.
+				cell.image.file2 = icons[i].isSilo and FACTORY_FRAME or nil
+				cell.image:Invalidate()
+				cell.label.font = labelFont
+				cell.label.objectOverrideFont = labelFont
+				cell.label:Invalidate()
+				cell.label:SetVisibility(true)
+			end
+			for i = n + 1, #cells do
+				cells[i].image:SetVisibility(false)
+				cells[i].label:SetVisibility(false)
+			end
+		end
+
+		-- Update the dynamic per-cell values every frame; these change the progress
+		-- bar fill and the count text in place without moving any cell.
+		for i = 1, n do
+			local cell = cells[i]
+			local data = icons[i]
+			if (data.progress or 0) > 0 then
+				cell.bar:SetValue(data.progress)
+				cell.bar:SetVisibility(true)
+			else
+				cell.bar:SetVisibility(false)
+			end
+			cell.label:SetCaption((data.count > 0) and tostring(data.count) or "")
+		end
+
+		-- Highlight the button (background + focus/hover colour) while launch mode is
+		-- active -- launcher tab open, or a launch command still armed after firing --
+		-- matching the integral menu's selected-command colour. Applied last (after any
+		-- resize/relayout above, which reset the colour) and every update, so the
+		-- highlight is not lost when the missile count changes.
+		local launcherActive = (WG.IsLaunchActive and WG.IsLaunchActive()) or false
+		if launcherActive ~= lastLauncherActive then
+			lastLauncherActive = launcherActive
+			buttonControl.focusColor = launcherActive and LAUNCH_SELECTED_COLOR or defaultFocusColor
+		end
+		button.SetBackgroundColor(launcherActive and LAUNCH_SELECTED_COLOR or BUTTON_COLOR)
+		return true
+	end
+
+	function externalFunctions.UpdateHotkey()
+	end
+
+	function externalFunctions.Destroy()
+		button.Destroy()
+		button = nil
+	end
+
+	externalFunctions.UpdateButton(0)
+	return externalFunctions
+end
+
+-------------------------------------------------------------------------------
+-------------------------------------------------------------------------------
+-- Global Build Command button
+--
+-- Toggles GBC mode (unit_global_build_command.lua), same as its hotkey, and
+-- is highlighted while the mode is on, like the launch button while the
+-- launcher is open. The bottom label is how many jobs we have queued. Present
+-- while that widget is enabled; removes itself (UpdateButton returns false)
+-- when it isn't.
+
+local function GetGBCButton(parent)
+	local function OnClick(mouse)
+		local gbc = WG.GlobalBuildCommandV2
+		if gbc then
+			gbc.Toggle()
+		end
+	end
+
+	local button = GetNewButton(parent, OnClick, GBC_ORDER, 0, BUTTON_COLOR, GBC_ICON)
+	local buttonControl = button.GetButtonControl()
+	local defaultFocusColor = buttonControl.focusColor
+
+	local externalFunctions = {
+		SetPosition = button.SetPosition,
+		MoveUp = button.MoveUp,
+		MoveDown = button.MoveDown,
+		GetOrder = button.GetOrder,
+		UpdatePosition = button.UpdatePosition,
+		SetImageVisible = button.SetImageVisible,
+		UpdateFontSize = button.UpdateFontSize,
+	}
+
+	local lastActive, lastJobCount, lastHotkey
+
+	-- Cheap enough to run every frame, so the highlight follows the hotkey
+	-- without waiting for the throttled button update.
+	function externalFunctions.UpdateHighlight()
+		local gbc = WG.GlobalBuildCommandV2
+		local active = (gbc and gbc.IsActive()) or false
+		if active ~= lastActive then
+			lastActive = active
+			buttonControl.focusColor = active and LAUNCH_SELECTED_COLOR or defaultFocusColor
+			button.SetBackgroundColor(active and LAUNCH_SELECTED_COLOR or BUTTON_COLOR)
+		end
+	end
+
+	function externalFunctions.UpdateButton(dt)
+		local gbc = WG.GlobalBuildCommandV2
+		if not (gbc and options.showGBCButton.value) then
+			return false
+		end
+
+		externalFunctions.UpdateHighlight()
+
+		local jobCount = gbc.GetJobCount()
+		local hotkey = gbc.GetHotkey()
+		if jobCount ~= lastJobCount or hotkey ~= lastHotkey then
+			lastJobCount = jobCount
+			lastHotkey = hotkey
+			button.SetBottomLabel((jobCount > 0) and tostring(jobCount) or "")
+			button.SetHotkey(hotkey)
+			button.SetTooltip("Global Build Command mode" .. ((hotkey ~= "") and (" (" .. hotkey .. ")") or "") ..
+				"\nWhile on, build, repair and reclaim orders are queued as GBC jobs instead of given to the selected units." ..
+				"\nQueued jobs: " .. jobCount ..
+				"\n\255\0\255\0" .. WG.Translate("interface", "lmb") .. ": toggle\008")
+		end
+		return true
+	end
+
+	function externalFunctions.UpdateHotkey()
+		lastHotkey = nil -- picked up on the next UpdateButton
+	end
+
+	function externalFunctions.Destroy()
+		button.Destroy()
+		button = nil
+	end
+
+	externalFunctions.UpdateButton(0)
+	return externalFunctions
+end
+
+-------------------------------------------------------------------------------
+-------------------------------------------------------------------------------
+-- Unit List Handler
+
+local function GetButtonListHandler(buttonBackground)
+
+	local buttons = {}
+	local buttonMap = {}
+	local buttonList = {}
+	local buttonCount = 0
+	
+	local externalFunctions = {}
+	
+	function externalFunctions.GetButton(buttonID)
+		return buttonID and buttons[buttonID]
+	end
+	
+	function externalFunctions.MoveDown(category, index)
+		for i = 1, buttonCount do
+			local button = buttons[buttonList[i]]
+			button.MoveDown(category, index)
+		end
+	end
+	
+	function externalFunctions.RemoveButton(buttonID)
+		if not externalFunctions.GetButton(buttonID) then
+			return
+		end
+		local category, index = buttons[buttonID].GetOrder()
+		buttons[buttonID].Destroy()
+		buttons[buttonID] = nil
+		
+		buttonList[buttonMap[buttonID]] = buttonList[buttonCount]
+		buttonMap[buttonList[buttonCount]] = buttonMap[buttonID]
+		buttonMap[buttonID] = nil
+		buttonList[buttonCount] = nil
+		buttonCount = buttonCount - 1
+		
+		externalFunctions.MoveDown(category, index)
+		buttonBackground.UpdateSize(buttonCount)
+	end
+		
+	function externalFunctions.MoveUp(category, index)
+		local position = 1
+		for i = 1, buttonCount do
+			local buttonID = buttonList[i]
+			local button = buttons[buttonID]
+			local moved = button.MoveUp(category, index)
+			if not moved then
+				position = position + 1
+			end
+		end
+		return position
+	end
+	
+	function externalFunctions.AddButton(buttonID, button)
+		buttons[buttonID] = button
+		
+		local category, index = button.GetOrder()
+		local position = externalFunctions.MoveUp(category, index)
+		button.SetPosition(position)
+		
+		buttonCount = buttonCount + 1
+		buttonList[buttonCount] = buttonID
+		buttonMap[buttonID] = buttonCount
+		buttonBackground.UpdateSize(buttonCount)
+	end
+	
+	function externalFunctions.UpdateButtons(dt)
+		local i = 1
+		while i <= buttonCount do
+			local buttonID = buttonList[i]
+			if buttons[buttonID].UpdateButton(dt) then
+				i = i + 1
+			else
+				externalFunctions.RemoveButton(buttonID)
+			end
+		end
+	end
+	
+	function externalFunctions.UpdateLayout()
+		for i = 1, buttonCount do
+			local button = buttons[buttonList[i]]
+			button.UpdatePosition()
+		end
+		buttonBackground.UpdateSize(buttonCount)
+	end
+	
+	function externalFunctions.UpdateFontSizes()
+		for i = 1, buttonCount do
+			local button = buttons[buttonList[i]]
+			button.UpdateFontSize()
+		end
+	end
+	
+	function externalFunctions.DeleteButtons()
+		for i = 1, buttonCount do
+			local button = buttons[buttonList[i]]
+			button.Destroy()
+		end
+		buttons = {}
+		buttonMap = {}
+		buttonList = {}
+		buttonCount = 0
+		buttonBackground.UpdateSize(buttonCount)
+	end
+	
+	function externalFunctions.SetImagesVisible(newVisible)
+		for i = 1, buttonCount do
+			local buttonID = buttonList[i]
+			buttons[buttonID].SetImageVisible(newVisible)
+		end
+	end
+	
+	function externalFunctions.Destroy()
+		for i = 1, buttonCount do
+			local buttonID = buttonList[i]
+			buttons[buttonID].Destroy()
+		end
+	end
+	
+	return externalFunctions
+end
+
+-------------------------------------------------------------------------------
+-------------------------------------------------------------------------------
+-- Factory and Commander Handling
+
+local function AddComm(unitID, unitDefID)
+	if buttonList.GetButton(unitID) then
+		return
+	end
+	
+	local button = GetCommanderButton(buttonHolder, unitID, unitDefID, commanderIndex)
+	commanderIndex = commanderIndex + 1
+	
+	commanderList[#commanderList + 1] = button
+	
+	buttonList.AddButton(unitID, button)
+end
+
+local function RemoveComm(unitID)
+	local i = 1
+	local removing = false
+	local commCount = #commanderList
+	for i = 1, commCount do
+		if removing then
+			commanderList[i - 1] = commanderList[i]
+		elseif commanderList[i].unitID == unitID then
+			removing = true
+		end
+	end
+	if removing then
+		commanderList[commCount] = nil
+	end
+
+	buttonList.RemoveButton(unitID)
+end
+
+local function AddFac(unitID, unitDefID)
+	if buttonList.GetButton(unitID) then
+		return
+	end
+	
+	local button = GetFactoryButton(buttonHolder, unitID, unitDefID, factoryIndex)
+	factoryIndex = factoryIndex + 1
+	
+	factoryList[#factoryList + 1] = button
+	
+	buttonList.AddButton(unitID, button)
+end
+
+local function RemoveFac(unitID)
+	local i = 1
+	local removing = false
+	local facCount = #factoryList
+	for i = 1, facCount do
+		if removing then
+			factoryList[i - 1] = factoryList[i]
+		elseif factoryList[i].unitID == unitID then
+			removing = true
+		end
+	end
+	if removing then
+		factoryList[facCount] = nil
+	end
+	
+	buttonList.RemoveButton(unitID)
+end
+
+-------------------------------------------------------------------------------
+-------------------------------------------------------------------------------
+-- Constructor Handling
+
+local function RefreshConsList()
+	idleCons = {}
+	if Spring.GetGameFrame() > 1 and myTeamID then
+		local buttonList = Spring.GetTeamUnits(myTeamID)
+		for _,unitID in pairs(buttonList) do
+			local unitDefID = spGetUnitDefID(unitID)
+			if unitDefID then
+				widget:UnitFinished(unitID, unitDefID, myTeamID)
+			end
+		end
+	end
+end
+
+options.monitoridlecomms.OnChange = RefreshConsList
+options.monitoridlenano.OnChange = RefreshConsList
+options.monitorInbuiltCons.OnChange = RefreshConsList
+
+-- Check current cmdID and the queue for a double-wait
+local function HasDoubleCommand(unitID, cmdID)
+	if cmdID == CMD.WAIT or cmdID == CMD.SELFD then
+		local cmdsLen = Spring.GetUnitCommandCount(unitID)
+		if cmdsLen == 0 then -- Occurs in the case of SELFD
+			return true
+		elseif cmdsLen == 1 then
+			local currCmdID = Spring.GetUnitCurrentCommand(unitID)
+			return currCmdID == CMD.WAIT
+		end
+	end
+	return false
+end
+
+-- Check the queue for an attack command
+local function isAttackQueued(unitID)
+	local cmdsLen = Spring.GetUnitCommandCount(unitID)
+	if cmdsLen and (cmdsLen > 0) then
+		local cmds = Spring.GetUnitCommands(unitID,-1)
+		for i = 1,cmdsLen do
+			if cmds and cmds[i] and ((cmds[i].id == CMD.ATTACK) or (cmds[i].id == CMD.AREA_ATTACK)) then
+				return true
+			end
+		end
+	end
+	return false
+end
+
+-- Check to see if the bomber is ready and untasked
+local function setBomberReadyStatus(unitID)
+	local noAmmo = spGetUnitRulesParam(unitID, "noammo")
+	if (noAmmo and noAmmo ~= 0) or select(3, Spring.GetUnitIsStunned(unitID)) or isAttackQueued(unitID) then
+		readyUntaskedBombers[unitID] = nil
+	else
+		readyUntaskedBombers[unitID] = true
+	end
+end
+
+-------------------------------------------------------------------------------
+-------------------------------------------------------------------------------
+-- Initialization
+
+local function InitializeUnits()
+	if myTeamID then
+		local buttonList = Spring.GetTeamUnits(myTeamID)
+		for _,unitID in pairs(buttonList) do
+			local unitDefID = spGetUnitDefID(unitID)
+			--Spring.Echo(unitID, unitDefID)
+			if unitDefID then
+				widget:UnitCreated(unitID, unitDefID, myTeamID)
+				widget:UnitFinished(unitID, unitDefID, myTeamID)
+			end
+		end
+	end
+end
+
+local function InitializeControls()
+	-- Set the size for the default settings.
+	local screenWidth, screenHeight = Spring.GetViewGeometry()
+	local BUTTON_HEIGHT = 55*options.buttonSizeLong.value/60
+	local integralWidth = math.max(350, math.min(450, screenWidth*screenHeight*0.0004))
+	local integralHeight = math.min(screenHeight/4.5, 200*integralWidth/450)
+	local bottom = integralHeight
+	local windowY = bottom - BUTTON_HEIGHT
+	
+	mainWindow = Window:New{
+		padding = {-1, 0, -1, -1},
+		itemMargin = {0, 0, 0, 0},
+		name = "selector_window",
+		x = 0,
+		y = windowY,
+		width  = integralWidth,
+		height = BUTTON_HEIGHT,
+		parent = Chili.Screen0,
+		dockable  = true,
+		draggable = false,
+		resizable = false,
+		tweakDraggable = true,
+		tweakResizable = true,
+		minWidth = 32,
+		minHeight = 32,
+		noFont = true,
+		color = {0,0,0,0},
+		OnClick = {
+			function(self)
+				local alt, ctrl, meta, shift = Spring.GetModKeyState()
+				if not meta then
+					return false
+				end
+				WG.crude.OpenPath(options_path)
+				WG.crude.ShowMenu()
+				return true
+			end
+		},
+	}
+	mainWindow:BringToFront()
+
+	mainBackground = GetBackground(mainWindow)
+	buttonHolder = mainBackground.GetButtonsHolder()
+	
+	buttonList = GetButtonListHandler(mainBackground)
+	buttonList.AddButton(CONSTRUCTOR_BUTTON_ID, GetConstructorButton(buttonHolder))
+		
+	buttonHolder.OnResize[#buttonHolder.OnResize + 1] = ButtonHolderResize
+	
+	InitializeUnits()
+	CheckHide()
+end
+
+-- Assigns the forward-declared local (see top of file) so the missile option
+-- OnChange handlers can call it.
+function ClearData()
+	factoryList = {}
+	commanderList = {}
+	idleCons = {}
+	idleTransports = {}
+	fromTransportIDToCarriedConID = {}
+	fromConIDToCarryingTransportID = {}
+	consCarriedByEnemyTransports = {}
+	wantUpdateCons = false
+	readyUntaskedBombers = {}
+	
+	idleConCount = 0
+	factoryIndex = 1
+	commanderIndex = 1
+	
+	oldButtonList = buttonList
+	
+	buttonList = GetButtonListHandler(mainBackground)
+	buttonList.AddButton(CONSTRUCTOR_BUTTON_ID, GetConstructorButton(buttonHolder))
+	InitializeUnits()
+
+	buttonList.SetImagesVisible(false)
+end
+
+-------------------------------------------------------------------------------
+-------------------------------------------------------------------------------
+-- Callins
+
+function widget:UnitCreated(unitID, unitDefID, unitTeam)
+	if (not myTeamID or unitTeam ~= myTeamID) then
+		return
+	end
+	local ud = UnitDefs[unitDefID]
+	
+	if ud.isFactory and (not exceptionArray[unitDefID]) then
+		if not (options.hideMissileSilos.value and unitDefID == MISSILE_SILO_DEFID) then
+			AddFac(unitID, unitDefID)
+		end
+	elseif ud.customParams.level then
+		AddComm(unitID, unitDefID)
+	elseif options.monitorInbuiltCons.value and CanBeAnIdleCons(ud) then
+		idleCons[unitID] = true
+		wantUpdateCons = true
+	end
+end
+
+function widget:UnitLoaded(unitID, unitDefID, unitTeam, transportID, transportTeam)
+	if CanBeAnIdleCons(UnitDefs[unitDefID]) and GetUnitCanBuild(unitID, unitDefID) then
+		if myTeamID == unitTeam then
+			if unitTeam == transportTeam then
+				idleCons[unitID] = true
+				fromConIDToCarryingTransportID[unitID] = transportID
+				fromTransportIDToCarriedConID[transportID] = unitID
+				wantUpdateCons = true
+			else
+				consCarriedByEnemyTransports[unitID] = true
+				widget:UnitTaken(unitID, unitDefID, unitTeam)
+			end
+		end
+	end
+end
+
+function widget:UnitUnloaded(unitID, unitDefID, unitTeam, transportID, transportTeam)
+	if consCarriedByEnemyTransports[unitID] then 
+		consCarriedByEnemyTransports[unitID] = nil
+		wantUpdateCons = true
+	end
+	if myTeamID == unitTeam and GetUnitCanBuild(unitID, unitDefID) then
+		if fromConIDToCarryingTransportID[unitID] then
+			fromConIDToCarryingTransportID[unitID] = nil
+			fromTransportIDToCarriedConID[transportID] = nil
+			wantUpdateCons = true
+		else
+			widget:UnitGiven(unitID, unitDefID, unitTeam, nil)
+		end
+	end
+end
+
+function widget:UnitFinished(unitID, unitDefID, unitTeam)
+	if (not myTeamID or unitTeam ~= myTeamID) or exceptionArray[unitDefID] then
+		return
+	end
+	local ud = UnitDefs[unitDefID]
+	if fromTransportIDToCarriedConID[unitID] then
+		local cQueue = Spring.GetUnitCommandCount(unitID)
+		if cQueue == 0 then -- no commands
+			widget:UnitIdle(unitID, unitDefID, myTeamID)
+		end
+	end
+	-- don't consider cons units loaded onto enemy transports as idle
+	if GetUnitCanBuild(unitID, unitDefID) and IsConNotCarriedByEnemyTransport(unitID) then  --- can build
+		local bQueue = spGetFullBuildQueue(unitID)
+		if not bQueue[1] then  --- has no build queue
+			if not ud.isFactory then
+				local cQueue = Spring.GetUnitCommandCount(unitID)
+				--Spring.Echo("Con "..unitID.." queue "..tostring(cQueue[1]))
+				if cQueue == 0 then
+					--Spring.Echo("\tCon "..unitID.." must be idle")
+					widget:UnitIdle(unitID, unitDefID, myTeamID)
+				end
+			end
+		end
+	end
+	local unitName = UnitDefs[unitDefID].name
+	if (unitName == "bomberprec") then
+		setBomberReadyStatus(unitID)
+	end
+end
+
+function widget:UnitGiven(unitID, unitDefID, unitTeam, oldTeam)
+	widget:UnitCreated(unitID, unitDefID, unitTeam)
+	widget:UnitFinished(unitID, unitDefID, unitTeam)
+end
+
+function widget:UnitDestroyed(unitID, unitDefID, unitTeam)
+	if (not myTeamID or unitTeam ~= myTeamID) then
+		return
+	end
+	-- constructor carried by a transport?
+	if fromConIDToCarryingTransportID[unitID] then
+		local transportID = fromConIDToCarryingTransportID[unitID]
+		fromConIDToCarryingTransportID[unitID] = nil
+		fromTransportIDToCarriedConID[transportID] = nil
+		idleTransports[transportID] = nil
+		wantUpdateCons = true
+	end
+	-- transport carrying a constructor?
+	if fromTransportIDToCarriedConID[unitID] then
+		local conID = fromConIDToCarryingTransportID[unitID]
+		fromConIDToCarryingTransportID[conID] = nil
+		fromTransportIDToCarriedConID[unitID] = nil
+		idleTransports[unitID] = nil
+		wantUpdateCons = true
+	end
+	if idleCons[unitID] then
+		idleCons[unitID] = nil
+		wantUpdateCons = true
+	end
+	if readyUntaskedBombers[unitID] then
+		readyUntaskedBombers[unitID] = nil
+	end
+	
+	local ud = UnitDefs[unitDefID]
+	if ud.isFactory and (not exceptionArray[unitDefID]) then
+		RemoveFac(unitID)
+	elseif ud.customParams.level then
+		RemoveComm(unitID)
+	end
+end
+
+function widget:UnitTaken(unitID, unitDefID, unitTeam, newTeam)
+	widget:UnitDestroyed(unitID, unitDefID, unitTeam)
+end
+
+function widget:UnitIdle(unitID, unitDefID, unitTeam)
+	if (unitTeam ~= myTeamID) then
+		return
+	end
+	if fromTransportIDToCarriedConID[unitID] then
+		idleTransports[unitID] = true
+		wantUpdateCons = true
+	end
+	local ud = UnitDefs[unitDefID]
+	if CanBeAnIdleCons(ud) and IsConNotCarriedByEnemyTransport(unitID) and Spring.GetUnitIsDead(unitID) == false then
+		idleCons[unitID] = true
+		wantUpdateCons = true
+	end
+	local unitName = UnitDefs[unitDefID].name
+	if (unitName == "bomberprec") then
+		setBomberReadyStatus(unitID)
+	end
+end
+
+function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdOpts, cmdParams)
+	if (not myTeamID or unitTeam ~= myTeamID) then
+		return
+	end
+	if cmdID and stateCommands[cmdID] then
+		return
+	end
+	
+	-- Double wait means the same as an empty queue
+	-- It is just an engine hack
+	if HasDoubleCommand(unitID,cmdID) then
+		widget:UnitIdle(unitID,unitDefID,unitTeam)
+		return
+	end
+	
+	if idleTransports[unitID] then
+		idleTransports[unitID] = nil
+		wantUpdateCons = true
+	end
+	
+	if idleCons[unitID] then
+		idleCons[unitID] = nil
+		wantUpdateCons = true
+	end
+
+	local unitName = UnitDefs[unitDefID].name
+	if (unitName == "bomberprec") then
+		setBomberReadyStatus(unitID)
+	end
+end
+
+local timer = 0
+function widget:Update(dt)
+	if mainBackground and mainBackground.GetSpecMode() then
+		return
+	end
+	
+	if oldButtonList then
+		oldButtonList.Destroy()
+		buttonList.SetImagesVisible(true)
+		oldButtonList = nil
+	end
+	if myTeamID ~= Spring.GetMyTeamID() then
+		myTeamID = Spring.GetMyTeamID()
+		ClearData()
+	end
+	
+	if wantUpdateCons then
+		buttonList.GetButton(CONSTRUCTOR_BUTTON_ID).UpdateButton(dt)
+		wantUpdateCons = false
+		--debugIdleConsState()
+	end
+
+	-- Add the GBC button whenever GBC v2 is enabled; it removes itself when not.
+	if options.showGBCButton.value and WG.GlobalBuildCommandV2 then
+		local gbcButton = buttonList.GetButton(GBC_BUTTON_ID)
+		if gbcButton then
+			gbcButton.UpdateHighlight()
+		else
+			buttonList.AddButton(GBC_BUTTON_ID, GetGBCButton(buttonHolder))
+		end
+	end
+
+	-- Add the launch button as soon as there are missiles to launch, every frame
+	-- rather than only in the throttled block below, so it appears promptly when
+	-- a missile starts building. Populate it at once so it is not shown empty.
+	if options.showLaunchButton.value and WG.missileActiveIcons and #WG.missileActiveIcons > 0 and not buttonList.GetButton(LAUNCH_BUTTON_ID) then
+		local launchButton = GetLaunchButton(buttonHolder)
+		buttonList.AddButton(LAUNCH_BUTTON_ID, launchButton)
+		launchButton.UpdateButton(dt)
+	end
+
+	timer = timer + dt
+	if timer < UPDATE_FREQUENCY then
+		return
+	end
+
+	buttonList.UpdateButtons(timer)
+
+	-- The launch button was removed (no missiles left): shrink the panel and
+	-- relayout. Growth while the button exists is handled inline in UpdateButton.
+	if wantLaunchRelayout then
+		wantLaunchRelayout = false
+		if mainBackground then
+			mainBackground.UpdateSize()
+		end
+		buttonList.UpdateLayout()
+	end
+
+	timer = 0
+end
+
+-- for "under attack" achtung sign
+function widget:UnitDamaged(unitID, unitDefID, unitTeam, damage)
+	if damage > 1 then
+		local button = buttonList.GetButton(unitID)
+		if button and button.SetWarning then
+			button.SetWarning(COMM_WARNING_TIME)
+		end
+	end
+end
+
+-------------------------------------------------------------------------------
+-------------------------------------------------------------------------------
+-- External functions
+
+local externalFunctions = {}
+
+function externalFunctions.SetSpecSpaceVisible(newVisible)
+	if mainBackground then
+		mainBackground.UpdateSpecSpace(newVisible)
+	end
+end
+
+function externalFunctions.ForceUpdate()
+	if mainBackground and mainBackground.GetSpecMode() then
+		return
+	end
+	buttonList.UpdateButtons(timer)
+	timer = 0
+end
+
+-------------------------------------------------------------------------------
+-------------------------------------------------------------------------------
+
+function widget:Shutdown()
+	if mainWindow then
+		mainWindow:Dispose()
+	end
+	widgetHandler:RemoveAction("selectcomm")
+	widgetHandler:RemoveAction("selectprecbomber")
+	WG.CoreSelector = nil
+end
+
+function widget:Initialize()
+	if (not WG.Chili) then
+		widgetHandler:RemoveWidget(widget)
+		return
+	end
+	
+	widgetHandler:AddAction("selectcomm", SelectComm, nil, 'tp')
+	widgetHandler:AddAction("selectprecbomber", SelectPrecBomber, nil, 'tp')
+	widgetHandler:AddAction("selectidlecon", SelectIdleCon, nil, 'tp')
+	widgetHandler:AddAction("selectidlecon_all", SelectIdleCon_all, nil, 'tp')
+
+	-- setup Chili
+	Chili = WG.Chili
+	Button = Chili.Button
+	Control = Chili.Control
+	Label = Chili.Label
+	Window = Chili.Window
+	Panel = Chili.Panel
+	Image = Chili.Image
+	Progressbar = Chili.Progressbar
+	screen0 = Chili.Screen0
+
+	InitializeControls()
+	
+	WG.CoreSelector = externalFunctions
+end
